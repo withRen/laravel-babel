@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Services\Engine\Bibliotheque;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
@@ -15,7 +16,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Les dimensions de la bibliothèque (N = 29^3200 pages) : un calcul GMP fait une seule fois par
+        // processus, puis partagé par le validateur et le tirage au hasard.
+        $this->app->singleton(Bibliotheque::class);
     }
 
     /**
