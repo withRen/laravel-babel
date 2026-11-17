@@ -11,8 +11,8 @@ return [
     // URL du front Angular (origine autorisée par CORS, cf. config/cors.php).
     'frontend_url' => env('FRONTEND_URL', 'http://localhost:4200'),
 
-    // Clé d'API du moteur fourni par l'enseignant (cours du 17/11).
-    'engine_key' => env('BABEL_ENGINE_KEY'),
+    // La clé de la bibliothèque (`config('babel.cle')`, variable BABEL_KEY) est déclarée par le
+    // paquet but-mmi-beziers/babel-moteur, fusionné avec ce fichier. La générer : `php artisan babel:cle`.
 
     // Jeton d'accès au réseau Babel (branchement du 02/12).
     'network_token' => env('BABEL_NETWORK_TOKEN'),

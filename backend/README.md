@@ -9,5 +9,5 @@ php artisan reverb:start  # WebSocket sur le port 8080
 ./vendor/bin/pest         # tests
 ```
 
-Les secrets (`BABEL_ENGINE_KEY`, `BABEL_NETWORK_TOKEN`, `BABEL_ANNOUNCE_SECRET`) se remplissent dans `.env`
-et se lisent uniquement via `config('babel.*')`.
+Les secrets (`BABEL_KEY`, `BABEL_NETWORK_TOKEN`, `BABEL_ANNOUNCE_SECRET`) se remplissent dans `.env`
+et se lisent uniquement via `config('babel.*')` (la clé du moteur : `config('babel.cle')`).
