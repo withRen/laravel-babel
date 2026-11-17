@@ -1,6 +1,9 @@
 <?php
 
 use App\Exceptions\RenduErreursApi;
+use App\Http\Middleware\AuthentificationOptionnelle;
+use App\Http\Middleware\CompteActif;
+use App\Http\Middleware\InscriptionsOuvertes;
 use App\Http\Middleware\JetonReseau;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -37,7 +40,18 @@ return Application::configure(basePath: dirname(__DIR__))
         // null, qui serait indiscernable d'un élément absent.
         $middleware->convertEmptyStringsToNull(except: [fn (Request $request) => $request->is('api/v1/lectures')]);
 
-        $middleware->alias(['jeton.reseau' => JetonReseau::class]);
+        // Jamais de redirection vers une route « login » (elle n'existe pas : le back-office a sa propre
+        // connexion) : un jeton manquant donne la 401 JSON du contrat, avec ou sans « Accept: application/json ».
+        $middleware->redirectGuestsTo(fn () => null);
+
+        $middleware->alias([
+            'jeton.reseau' => JetonReseau::class,
+            // Routes « membre » : auth:sanctum (401 sans jeton valide) puis compte.actif (403 si suspendu).
+            'inscriptions.ouvertes' => InscriptionsOuvertes::class,
+            'compte.actif' => CompteActif::class,
+            // Routes ouvertes aux visiteurs qui tiennent compte du membre quand un jeton valide est envoyé.
+            'auth.optionnelle' => AuthentificationOptionnelle::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         RenduErreursApi::enregistrer($exceptions);
