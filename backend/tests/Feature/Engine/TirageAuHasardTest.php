@@ -39,85 +39,80 @@ function seuilKhiDeux(int $ddl): float
     return $ddl + 8 * sqrt(2 * $ddl);
 }
 
+/*
+ * Un tirage fait ~3 000 caractères : garder 10 000 adresses coûterait ~30 Mo (et davantage une fois
+ * découpées). On ne garde donc que des compteurs, calculés au fil des tirages.
+ */
 beforeAll(function () {
     $tirage = app(TirageAuHasard::class);
-    $adresses = [];
+    $valideur = app(Valideur::class);
+    $stats = ['mur' => [], 'etagere' => [], 'volume' => [], 'page' => [], 'longueurs' => [], 'valides' => 0, 'empreintes' => []];
+
     for ($i = 0; $i < TIRAGES; $i++) {
-        $adresses[] = $tirage->auHasard();
+        $adresse = $tirage->auHasard();
+        preg_match('/\A([0-9a-z]+)-w(\d+)-s(\d+)-v(\d+):(\d+)\z/', $adresse, $m);
+
+        $stats['mur'][(int) $m[2]] = ($stats['mur'][(int) $m[2]] ?? 0) + 1;
+        $stats['etagere'][(int) $m[3]] = ($stats['etagere'][(int) $m[3]] ?? 0) + 1;
+        $stats['volume'][(int) $m[4]] = ($stats['volume'][(int) $m[4]] ?? 0) + 1;
+        $stats['page'][(int) $m[5]] = ($stats['page'][(int) $m[5]] ?? 0) + 1;
+        $stats['longueurs'][strlen($m[1])] = ($stats['longueurs'][strlen($m[1])] ?? 0) + 1;
+        $stats['valides'] += $valideur->valider($adresse)->niveau === 'page' ? 1 : 0;
+        $stats['empreintes'][md5($adresse)] = true; // 32 octets au lieu de 3 000 : suffit pour détecter un doublon
     }
-    // Les 10 000 tirages sont faits une fois et partagés par les tests de distribution.
-    $GLOBALS['tirages_babel'] = $adresses;
+
+    $GLOBALS['tirages_babel'] = $stats;
 });
 
 afterAll(fn () => $GLOBALS['tirages_babel'] = null);
 
 beforeEach(function () {
-    $this->adresses = $GLOBALS['tirages_babel'];
-    $this->champs = array_map(function (string $a): array {
-        preg_match('/\A([0-9a-z]+)-w(\d+)-s(\d+)-v(\d+):(\d+)\z/', $a, $m);
-
-        return ['hex' => $m[1], 'mur' => (int) $m[2], 'etagere' => (int) $m[3], 'volume' => (int) $m[4], 'page' => (int) $m[5]];
-    }, $this->adresses);
+    $this->stats = $GLOBALS['tirages_babel'];
 });
 
 describe('distribution sur 10 000 tirages', function () {
-    it('tire bien 10 000 adresses de pages valides', function () {
-        $valideur = app(Valideur::class);
-
-        expect($this->adresses)->toHaveCount(TIRAGES);
-        foreach ($this->adresses as $adresse) {
-            expect($valideur->valider($adresse)->niveau)->toBe('page');
-        }
+    it('tire 10 000 adresses de pages valides', function () {
+        expect($this->stats['valides'])->toBe(TIRAGES);
     });
 
     it('répartit les murs à parts égales', function () {
-        $c = array_count_values(array_column($this->champs, 'mur'));
-
-        expect(array_keys($c))->toHaveCount(Moteur::MURS)
-            ->and(khiDeux($c, Moteur::MURS, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::MURS - 1));
+        expect($this->stats['mur'])->toHaveCount(Moteur::MURS)
+            ->and(khiDeux($this->stats['mur'], Moteur::MURS, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::MURS - 1));
     });
 
     it('répartit les étagères à parts égales', function () {
-        $c = array_count_values(array_column($this->champs, 'etagere'));
-
-        expect(array_keys($c))->toHaveCount(Moteur::ETAGERES)
-            ->and(khiDeux($c, Moteur::ETAGERES, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::ETAGERES - 1));
+        expect($this->stats['etagere'])->toHaveCount(Moteur::ETAGERES)
+            ->and(khiDeux($this->stats['etagere'], Moteur::ETAGERES, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::ETAGERES - 1));
     });
 
     it('répartit les volumes à parts égales', function () {
-        $c = array_count_values(array_column($this->champs, 'volume'));
-
-        expect(min(array_keys($c)))->toBeGreaterThanOrEqual(1)
-            ->and(max(array_keys($c)))->toBeLessThanOrEqual(Moteur::VOLUMES)
-            ->and(khiDeux($c, Moteur::VOLUMES, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::VOLUMES - 1));
+        expect(min(array_keys($this->stats['volume'])))->toBeGreaterThanOrEqual(1)
+            ->and(max(array_keys($this->stats['volume'])))->toBeLessThanOrEqual(Moteur::VOLUMES)
+            ->and(khiDeux($this->stats['volume'], Moteur::VOLUMES, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::VOLUMES - 1));
     });
 
     it('répartit les pages à parts égales', function () {
-        $c = array_count_values(array_column($this->champs, 'page'));
-
-        expect(min(array_keys($c)))->toBeGreaterThanOrEqual(1)
-            ->and(max(array_keys($c)))->toBeLessThanOrEqual(Moteur::PAGES)
-            ->and(khiDeux($c, Moteur::PAGES, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::PAGES - 1));
+        expect(min(array_keys($this->stats['page'])))->toBeGreaterThanOrEqual(1)
+            ->and(max(array_keys($this->stats['page'])))->toBeLessThanOrEqual(Moteur::PAGES)
+            ->and(khiDeux($this->stats['page'], Moteur::PAGES, TIRAGES))->toBeLessThan(seuilKhiDeux(Moteur::PAGES - 1));
     });
 
     it('donne un hexagone de 3 004 caractères dans ~79 %, 3 003 dans ~20 %, moins dans moins de 1 %', function () {
-        $longueurs = array_map(fn (array $c) => strlen($c['hex']), $this->champs);
-        $part = fn (callable $filtre): float => count(array_filter($longueurs, $filtre)) / TIRAGES;
+        $l = $this->stats['longueurs'];
+        $part = fn (callable $filtre): float => array_sum(array_filter($l, $filtre, ARRAY_FILTER_USE_KEY)) / TIRAGES;
 
-        expect($part(fn ($l) => $l === 3004))->toBeGreaterThan(0.76)->toBeLessThan(0.82)
-            ->and($part(fn ($l) => $l === 3003))->toBeGreaterThan(0.17)->toBeLessThan(0.23)
-            ->and($part(fn ($l) => $l < 3003))->toBeLessThan(0.01);
+        expect($part(fn ($n) => $n === 3004))->toBeGreaterThan(0.76)->toBeLessThan(0.82)
+            ->and($part(fn ($n) => $n === 3003))->toBeGreaterThan(0.17)->toBeLessThan(0.23)
+            ->and($part(fn ($n) => $n < 3003))->toBeLessThan(0.01);
     });
 
     it('n\'a pas le piège des 64 bits : aucun hexagone court, presque tous très longs', function () {
-        $longueurs = array_map(fn (array $c) => strlen($c['hex']), $this->champs);
-
         // Un entier aléatoire de 64 bits donnerait des hexagones de 13 caractères au plus.
-        expect(min($longueurs))->toBeGreaterThan(2900);
+        expect(min(array_keys($this->stats['longueurs'])))->toBeGreaterThan(2900);
     });
 
     it('ne répète pas d\'adresse', function () {
-        expect(array_unique($this->adresses))->toHaveCount(TIRAGES);
+        expect($this->stats['empreintes'])->toHaveCount(TIRAGES);
     });
 });
 
