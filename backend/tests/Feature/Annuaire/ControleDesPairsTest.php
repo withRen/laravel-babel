@@ -3,6 +3,7 @@
 use App\Enums\EtatBibliotheque;
 use App\Jobs\ControlerPair;
 use App\Models\Bibliotheque;
+use App\Services\Annuaire\ControleurDePair;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -33,7 +34,7 @@ function pairVoisine(array $attributs = []): Bibliotheque
 
 function controler(Bibliotheque $pair): Bibliotheque
 {
-    (new ControlerPair($pair->id))->handle(app(App\Services\Annuaire\ControleurDePair::class));
+    (new ControlerPair($pair->id))->handle(app(ControleurDePair::class));
 
     return $pair->fresh();
 }
@@ -94,13 +95,13 @@ it('remet en ligne un pair hors ligne dès un contrôle réussi', function () {
     expect($pair->etat)->toBe(EtatBibliotheque::EnLigne)->and($pair->echecs_consecutifs)->toBe(0);
 });
 
-it("compte un pair injoignable ou trop lent comme un échec", function () {
+it('compte un pair injoignable ou trop lent comme un échec', function () {
     Http::fake(fn () => throw new ConnectionException('cURL error 28: timeout'));
 
     expect(controler(pairVoisine())->echecs_consecutifs)->toBe(1);
 });
 
-it("ne compte pas un 429 comme un échec : rien ne bouge", function () {
+it('ne compte pas un 429 comme un échec : rien ne bouge', function () {
     Http::fake(['*' => Http::response(['erreurs' => [['code' => 'ERR_TOO_MANY_REQUESTS', 'champ' => null, 'message' => 'Trop']]], 429, ['Retry-After' => '5'])]);
     $pair = pairVoisine(['echecs_consecutifs' => 2, 'etat' => EtatBibliotheque::EnLigne]);
 
@@ -132,7 +133,7 @@ it('compte une réponse hors contrat comme un échec', function (string $cas) {
     'champ en trop', 'description absente', 'mauvais identifiant (l\'URL ne désigne plus ce pair)',
 ]);
 
-it("ne se contrôle pas soi-même", function () {
+it('ne se contrôle pas soi-même', function () {
     Http::fake();
 
     controler(bibliothequeLocale());

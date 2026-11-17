@@ -10,7 +10,7 @@ use Illuminate\Console\Command;
 
 final class AnnoncerAuReseau extends Command
 {
-    protected $signature = "babel:annoncer {--controle : Déposer aussi une tâche de contrôle par pair}";
+    protected $signature = 'babel:annoncer {--controle : Déposer aussi une tâche de contrôle par pair}';
 
     protected $description = "S'annonce à l'annuaire du réseau et enregistre la liste des pairs";
 

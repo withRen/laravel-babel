@@ -10,7 +10,7 @@ use Illuminate\Console\Command;
 
 final class ControlerPairs extends Command
 {
-    protected $signature = "babel:controler-pairs";
+    protected $signature = 'babel:controler-pairs';
 
     protected $description = "Dépose une tâche de contrôle (lecture de l'identité) par pair connu";
 

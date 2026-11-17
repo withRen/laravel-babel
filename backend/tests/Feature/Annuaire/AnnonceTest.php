@@ -1,8 +1,10 @@
 <?php
 
 use App\Enums\EtatBibliotheque;
+use App\Jobs\ControlerPair;
 use App\Models\Bibliotheque;
 use App\Services\Annuaire\AnnuaireHttp;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
@@ -96,7 +98,7 @@ it("échoue proprement quand l'annuaire refuse l'annonce, répond de travers ou 
     Http::fake(match ($cas) {
         'annonce refusée' => ['*/annonce' => Http::response('', 401)],
         'liste sans elements' => ['*/annonce' => Http::response('', 204), '*/bibliotheques' => Http::response(['x' => 1])],
-        'annuaire injoignable' => fn () => throw new Illuminate\Http\Client\ConnectionException('timeout'),
+        'annuaire injoignable' => fn () => throw new ConnectionException('timeout'),
     });
 
     $this->artisan('babel:annoncer')->assertFailed();
@@ -115,7 +117,7 @@ it('dépose un contrôle par pair avec --controle', function () {
 
     $this->artisan('babel:annoncer', ['--controle' => true])->assertSuccessful();
 
-    Queue::assertPushed(App\Jobs\ControlerPair::class, 2);
+    Queue::assertPushed(ControlerPair::class, 2);
 });
 
 it('planifie le contrôle des pairs et, si l\'annuaire est configuré, l\'annonce', function () {
