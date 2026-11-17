@@ -44,7 +44,30 @@ expect()->extend('toBeOne', function () {
 |
 */
 
-function something()
+use App\Models\Bibliotheque;
+
+/** La ligne de notre bibliothèque, avec l'identifiant de l'exemple du contrat. */
+function bibliothequeLocale(array $attributs = []): Bibliotheque
 {
-    // ..
+    return Bibliotheque::factory()->locale()->create($attributs + [
+        'identifiant' => 'exemple',
+        'nom' => "La bibliothèque d'exemple",
+        'description' => 'Une bibliothèque de démonstration.',
+    ]);
+}
+
+/** L'en-tête qui présente le jeton réseau de test (voir phpunit.xml). */
+function jetonReseau(string $jeton = 'jeton-reseau-de-test'): array
+{
+    return ['Authorization' => 'Bearer '.$jeton];
+}
+
+/** Vérifie la forme exacte d'une erreur du contrat : une liste « erreurs » avec code, champ, message. */
+function attendErreurContrat($reponse, int $statut, string $code, ?string $champ): void
+{
+    $reponse->assertStatus($statut);
+    expect(array_keys($reponse->json()))->toBe(['erreurs']);
+    expect($reponse->json('erreurs.0.code'))->toBe($code);
+    expect($reponse->json('erreurs.0.champ'))->toBe($champ);
+    expect($reponse->json('erreurs.0.message'))->toBeString()->not->toBeEmpty();
 }

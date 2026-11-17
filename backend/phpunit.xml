@@ -19,6 +19,9 @@
     </source>
     <php>
         <env name="APP_ENV" value="testing"/>
+        <!-- Clé de test A du moteur : un vecteur de test PUBLIC du paquet (jamais la vraie clé de la bibliothèque). -->
+        <env name="BABEL_KEY" value="base64:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="/>
+        <env name="BABEL_NETWORK_TOKEN" value="jeton-reseau-de-test"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
