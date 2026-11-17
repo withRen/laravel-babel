@@ -27,8 +27,10 @@ cd backend && php artisan reverb:start                   # port 8080
 # Terminal 3 : front
 cd frontend && npm install && npx ng serve               # http://localhost:4200
 ```
+Moteur (une fois, sur ton poste) : `cd backend && php artisan babel:cle && php artisan babel:verifier` (doit finir par « Tout est prêt »).
+
 Panneau d'admin : http://localhost:8000/admin (créer un compte avec `php artisan make:filament-user`).
 
 ## Secrets
 
-Les clés du moteur, le jeton réseau et le secret d'annonce se mettent dans `backend/.env` (non versionné), jamais dans le dépôt.
+La clé du moteur (`BABEL_KEY`), le jeton réseau et le secret d'annonce se mettent dans `backend/.env` (non versionné), jamais dans le dépôt.

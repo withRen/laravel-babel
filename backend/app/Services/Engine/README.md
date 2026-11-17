@@ -1,8 +1,7 @@
-# Emplacement du moteur
+# Moteur
 
-Le moteur de la Bibliothèque de Babel est fourni par l'enseignant (cours du 17/11).
-Il sera rangé ici, dans `app/Services/Engine/`, et utilisé comme un service Laravel
-(injection de dépendances). Sa clé d'API se lit uniquement via `config('babel.engine_key')`.
+Le moteur est le paquet Composer `but-mmi-beziers/babel-moteur` (installé dans `vendor/`) : Laravel le découvre seul.
+Dans un contrôleur, on demande `Babel\Moteur\Moteur` en paramètre (injection de dépendances), jamais `new Moteur()`.
 
-À faire quand le moteur est publié : copier le code fourni, puis l'enregistrer dans
-`AppServiceProvider::register()`. Rien n'est écrit ici en attendant.
+Mise en route sur chaque poste : `php artisan babel:cle` puis `php artisan babel:verifier` (doit finir par « Tout est prêt »).
+La clé (`BABEL_KEY`) ne se committe jamais et ne se change jamais une fois des adresses partagées.
