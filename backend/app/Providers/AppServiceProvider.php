@@ -2,7 +2,10 @@
 
 namespace App\Providers;
 
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -23,5 +26,10 @@ class AppServiceProvider extends ServiceProvider
         // Hors production, une relation chargée « à la volée » (N+1) lève une exception :
         // on force l'eager loading (with()) dès le développement.
         Model::preventLazyLoading(! $this->app->isProduction());
+
+        // Limite de débit de la porte réseau (A10) : le contrat exige d'accepter AU MOINS
+        // 60 requêtes par minute et par adresse IP appelante. Au-delà, le rendu 429 du
+        // contrat (ERR_TOO_MANY_REQUESTS + Retry-After) est produit par RenduErreursApi.
+        RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(60)->by($request->ip()));
     }
 }
