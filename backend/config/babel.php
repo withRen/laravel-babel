@@ -9,6 +9,12 @@
 return [
 
     // URL du front Angular (origine autorisée par CORS, cf. config/cors.php).
+    // Identité de notre bibliothèque (ligne `est_locale` de la table bibliotheques).
+    // L'identifiant est remis par la plateforme et ne change jamais.
+    'identifiant' => env('BABEL_IDENTIFIANT', 'babel-3'),
+
+    'nom' => env('BABEL_NOM', 'Babel 3'),
+
     'frontend_url' => env('FRONTEND_URL', 'http://localhost:4200'),
 
     // La clé de la bibliothèque (`config('babel.cle')`, variable BABEL_KEY) est déclarée par le
