@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['utilisateur_id', 'adresse_id', 'contenu', 'est_publique', 'masque_le'])]
+#[Fillable(['utilisateur_id', 'adresse_id', 'contenu', 'est_publique', 'masque_le', 'a_convertir'])]
 class Annotation extends Model
 {
     /** @use HasFactory<AnnotationFactory> */
@@ -23,6 +23,7 @@ class Annotation extends Model
     {
         return [
             'est_publique' => 'boolean',
+            'a_convertir' => 'boolean',
             'masque_le' => 'datetime',
             'cree_le' => 'datetime',
             'maj_le' => 'datetime',

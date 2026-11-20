@@ -39,6 +39,7 @@ class User extends Authenticatable implements FilamentUser, HasName
             'role' => Role::class,
             'suspendu_le' => 'datetime',
             'derniere_connexion_le' => 'datetime',
+            'import_tentative_le' => 'datetime',
             'cree_le' => 'datetime',
         ];
     }

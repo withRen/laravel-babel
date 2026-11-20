@@ -19,6 +19,9 @@ Schedule::command('babel:controler-pairs')
     ->everyFiveMinutes()
     ->withoutOverlapping();
 
+// M12 : relance la conversion des adresses importées d'une autre bibliothèque tant qu'il en reste.
+Schedule::command('babel:convertir-import')->everyTenMinutes()->withoutOverlapping();
+
 // Réseau : relever les textes bannis des pairs (B5). Ils arrivent « proposés » : l'administrateur décide (A7).
 // La commande refuse de tourner sans BABEL_NETWORK_TOKEN, donc on ne la planifie que si le jeton existe.
 Schedule::command('babel:relever-textes-bannis')
