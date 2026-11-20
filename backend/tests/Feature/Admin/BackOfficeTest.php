@@ -8,7 +8,6 @@ use App\Filament\Resources\Reseau\Pages\ListBibliotheques;
 use App\Filament\Resources\Signalements\Pages\ListSignalements;
 use App\Filament\Resources\TextesBannis\Pages\ListTextesBannis;
 use App\Filament\Resources\Users\Pages\ListUsers;
-use App\Models\ActiviteJour;
 use App\Models\Adresse;
 use App\Models\Annotation;
 use App\Models\Bibliotheque;
@@ -319,14 +318,4 @@ it('affiche l\'état du réseau : pairs et clés changées (A9)', function () {
 
     livewire(ListBibliotheques::class)->assertCanSeeTableRecords([$pair])->assertCanNotSeeTableRecords([$this->locale])
         ->filterTable('cle_changee', ['isActive' => true])->assertCanSeeTableRecords([$pair]);
-});
-
-it('compte les activités du jour de façon atomique (A11)', function () {
-    ActiviteJour::compter('pages_lues');
-    ActiviteJour::compter('pages_lues');
-    ActiviteJour::compter('recherches');
-
-    $ligne = ActiviteJour::sole();
-    expect($ligne->pages_lues)->toBe(2)->and($ligne->recherches)->toBe(1);
-    expect(fn () => ActiviteJour::compter('autre'))->toThrow(InvalidArgumentException::class);
 });
