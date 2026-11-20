@@ -19,6 +19,13 @@ Schedule::command('babel:controler-pairs')
     ->everyFiveMinutes()
     ->withoutOverlapping();
 
+// Réseau : relever les textes bannis des pairs (B5). Ils arrivent « proposés » : l'administrateur décide (A7).
+// La commande refuse de tourner sans BABEL_NETWORK_TOKEN, donc on ne la planifie que si le jeton existe.
+Schedule::command('babel:relever-textes-bannis')
+    ->everyTenMinutes()
+    ->withoutOverlapping()
+    ->when(fn () => filled(config('babel.network_token')));
+
 // Modération (A5, A7) : relit les adresses enregistrées et marque celles qui contiennent un texte banni appliqué.
 Schedule::command('babel:verifier-bannis')
     ->hourly()

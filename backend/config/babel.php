@@ -47,4 +47,27 @@ return [
     // Au troisième échec de suite, un pair passe hors ligne.
     'pair_echecs_max' => 3,
 
+    // --- Temps réel (recherche réseau, Reverb) ---
+
+    // Ce que le NAVIGATEUR doit savoir pour se connecter au serveur Reverb (GET /app/infos, champ temps_reel).
+    // Derrière ngrok, l'hôte vu du navigateur n'est pas celui que le serveur utilise pour publier : on peut donc
+    // les séparer. Par défaut ce sont les valeurs REVERB_* de Laravel. Rien de secret ici (la clé Reverb est publique).
+    'temps_reel' => [
+        'hote' => env('BABEL_TEMPS_REEL_HOTE') ?: env('REVERB_HOST'),
+        'port' => (int) (env('BABEL_TEMPS_REEL_PORT') ?: env('REVERB_PORT', 443)),
+        'tls' => (env('BABEL_TEMPS_REEL_SCHEME') ?: env('REVERB_SCHEME', 'https')) === 'https',
+    ],
+
+    // --- Recherche réseau (V15) ---
+
+    // Combien de temps l'état d'une recherche réseau reste lisible (GET /app/recherches-reseau/{id}) : au moins 10 minutes.
+    'recherche_reseau_minutes' => 15,
+
+    // --- Proxies de confiance (quota par pair, A10) ---
+
+    // Adresses des proxies dont on croit l'en-tête X-Forwarded-For. Derrière ngrok (agent sur la même machine), le
+    // proxy se connecte depuis la boucle locale. « * » (tout croire) n'est sûr que si le serveur n'est joignable QUE
+    // par le proxy : sinon n'importe qui peut écrire X-Forwarded-For et esquiver le quota. Liste séparée par des virgules.
+    'trusted_proxies' => array_values(array_filter(array_map('trim', explode(',', (string) env('BABEL_TRUSTED_PROXIES', '127.0.0.1,::1'))))),
+
 ];
