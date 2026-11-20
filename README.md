@@ -23,9 +23,9 @@ Le développement suit une progression incrémentale alignée sur le cahier des 
 
 ### 1. Socle technique et environnement — Terminé
 - Initialisation du monorepo (`backend/`, `frontend/`, `bruno/`, `docs/`).
-- Mise en place de **Laravel 13** avec **Sanctum 4** (mode SPA + jetons API), **Filament 5** sur `/admin` et **Laravel Reverb** pour le temps réel.
+- Mise en place de **Laravel 13** avec **Sanctum 4** en **jetons Bearer** (le contrat d'API l'impose : l'app Angular et l'API n'ont pas la même origine, il n'y a ni cookie de session ni CSRF), **Filament 5** sur `/admin` et **Laravel Reverb** pour le temps réel.
 - Mise en place d'**Angular 22** avec Tailwind CSS et configuration SSR.
-- Création de la collection **Bruno** (`bruno/environments/local.bru`, `csrf-cookie.bru`, `utilisateur-courant.bru`).
+- Collection **Bruno** : environnement `bruno/environments/local.bru` ; les requêtes se génèrent depuis `docs/openapi.yaml` (voir `bruno/README.md`).
 
 ### 2. Intégration du moteur Babel — Terminé
 - Installation du paquet Composer `but-mmi-beziers/babel-moteur` (`^1.0`).
@@ -36,7 +36,7 @@ Le développement suit une progression incrémentale alignée sur le cahier des 
 - Conception des migrations et modèles Eloquent à partir des 14 tables du cahier des charges (aucun texte de page stocké en base, unicité par `(bibliotheque_id, empreinte)`).
 - Implémentation des règles serveur communes : `normaliser`, `valider` (codes `ERR_*`), `auHasard` (tirage uniforme sans graine).
 - Exposition des endpoints REST dans `routes/api.php` avec `FormRequest` et `API Resources` conformes au contrat OpenAPI commun.
-- Gestion des comptes locaux, marque-pages, collections, annotations, liens courts, signalements et modération dans Filament.
+- Back-office **Filament** (`/admin`, réservé aux administrateurs via la Gate `administrer`) : comptes (filtrer, suspendre, rétablir, supprimer, promouvoir), file des signalements (masquer, rétablir, rejeter), textes bannis (déclarer, lever, appliquer ceux des pairs), réglages (nom, description, inscriptions, quotas de l'API), état du réseau et statistiques.
 
 ### 4. Tests automatisés et intégration continue — À venir (20 nov.)
 - Mise en place de la suite de tests **Pest** (tests unitaires et fonctionnels, dont vérification statistique du tirage `auHasard`).
@@ -49,7 +49,7 @@ Le développement suit une progression incrémentale alignée sur le cahier des 
 
 ### 6. Interface Angular — À venir (déc. – jan.)
 - Lecture de pages, recherche (`exact` / `bruit`), normalisation affichée, localisation/surlignage (`localiser`) et navigation (`voisine`) côté client.
-- Authentification SPA par cookie HttpOnly + CSRF (`provideAppInitializer`, intercepteur fonctionnel, guards).
+- Authentification par **jeton Bearer** (`Authorization: Bearer …`) : jeton gardé côté client, intercepteur fonctionnel qui l'ajoute aux appels `/api/v1/app`, guards, `provideAppInitializer` pour retrouver le profil (`GET /moi`).
 - Espace membre, liens courts, recherche réseau en temps réel et rendu SSR.
 
 ---

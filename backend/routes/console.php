@@ -25,3 +25,8 @@ Schedule::command('babel:relever-textes-bannis')
     ->everyTenMinutes()
     ->withoutOverlapping()
     ->when(fn () => filled(config('babel.network_token')));
+
+// Modération (A5, A7) : relit les adresses enregistrées et marque celles qui contiennent un texte banni appliqué.
+Schedule::command('babel:verifier-bannis')
+    ->hourly()
+    ->withoutOverlapping();
