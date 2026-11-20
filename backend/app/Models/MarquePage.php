@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['utilisateur_id', 'adresse_id', 'titre'])]
+#[Fillable(['utilisateur_id', 'adresse_id', 'titre', 'a_convertir'])]
 class MarquePage extends Model
 {
     /** @use HasFactory<MarquePageFactory> */
@@ -20,7 +20,7 @@ class MarquePage extends Model
 
     protected function casts(): array
     {
-        return ['cree_le' => 'datetime'];
+        return ['cree_le' => 'datetime', 'a_convertir' => 'boolean'];
     }
 
     /** @return BelongsTo<User, $this> */

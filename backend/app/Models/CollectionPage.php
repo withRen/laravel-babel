@@ -12,7 +12,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * Eloquent ne sait pas la mettre à jour, on supprime et on recrée (réordonner = réécrire).
  */
 #[Table('collection_pages')]
-#[Fillable(['collection_id', 'position', 'adresse_id'])]
+#[Fillable(['collection_id', 'position', 'adresse_id', 'a_convertir'])]
 class CollectionPage extends Model
 {
     public $timestamps = false;
@@ -23,7 +23,7 @@ class CollectionPage extends Model
 
     protected function casts(): array
     {
-        return ['position' => 'integer'];
+        return ['position' => 'integer', 'a_convertir' => 'boolean'];
     }
 
     /** @return BelongsTo<Collection, $this> */
