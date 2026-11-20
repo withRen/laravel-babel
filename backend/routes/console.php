@@ -18,3 +18,8 @@ Schedule::command('babel:annoncer')
 Schedule::command('babel:controler-pairs')
     ->everyFiveMinutes()
     ->withoutOverlapping();
+
+// Modération (A5, A7) : relit les adresses enregistrées et marque celles qui contiennent un texte banni appliqué.
+Schedule::command('babel:verifier-bannis')
+    ->hourly()
+    ->withoutOverlapping();
