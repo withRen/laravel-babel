@@ -1,0 +1,4268 @@
+openapi: 3.1.0
+
+info:
+  title: Bibliothèque de Babel, contrat d'API
+  version: 1.1.0
+  summary: Le contrat commun des 10 bibliothèques, pour le réseau et pour l'application web Angular.
+  description: |
+    Ce document est **le contrat d'API commun** des 10 bibliothèques. Il décrit les deux
+    portes de votre serveur qui parlent JSON :
+
+    - **la porte réseau** (`/api/v1/…`) : ce que les autres bibliothèques, la plateforme
+      et le testeur de conformité appellent chez vous ;
+    - **la porte application** (`/api/v1/app/…`) : ce que votre application web Angular
+      appelle pour tout le reste (comptes, lecture, recherche, liens courts,
+      marque-pages, collections, annotations, signalements, export).
+
+    La troisième porte, le **back-office** de l'administrateur (stories A1 à A11), est
+    servie par le serveur lui-même (livrable 4, choix 9) : elle n'est pas dans ce contrat.
+
+    Les deux portes sont communes aux 10 bibliothèques : n'importe quelle application
+    Angular écrite contre ce contrat fonctionne avec n'importe quel serveur qui le
+    respecte. Une réponse qui s'en écarte, même d'un nom de champ, compte comme un échec.
+
+    Il découle du cahier des charges final (livrables 1 à 4) et du moteur
+    `but-mmi-beziers/babel-moteur` (v1.0.1). Les numéros entre parenthèses renvoient aux
+    stories (V…, M…, A…, B…) et aux fonctions (F1 à F8).
+
+    ## Règles communes
+
+    1. **Adresse de base** : toutes les routes sont servies sous `/api/v1`.
+    2. **JSON en UTF-8** : `Content-Type: application/json` dans les deux sens. Les noms
+       de champs sont en français, en minuscules, avec des tirets bas. Une réponse ne
+       contient que les champs prévus, tous présents (une valeur absente vaut `null`).
+    3. **La porte réseau est ouverte en lecture** : aucune route ne demande de compte.
+       Une autre bibliothèque voit ce qu'un visiteur voit. Seule `GET /textes-bannis`
+       exige le jeton réseau. Le réseau ne transporte aucune écriture.
+    4. **La porte application** distingue le visiteur (sans jeton) et le membre (jeton
+       de session dans `Authorization: Bearer …`, obtenu à la connexion). Une route
+       marquée « membre » répond `401` sans jeton valide. Une route ouverte aux visiteurs
+       accepte aussi le jeton d'un membre et en tient compte.
+    5. **Deux secondes** : un pair a 2 secondes pour répondre. Au-delà, l'appelant
+       compte un échec.
+    6. **Limite de débit** (A10) : chaque bibliothèque choisit son quota, mais accepte
+       **au moins 60 requêtes par minute et par adresse IP appelante** sur la porte
+       réseau. Au-delà, elle répond `429` avec l'en-tête `Retry-After` et le code
+       `ERR_TOO_MANY_REQUESTS`. Un `429` n'est pas un échec : le pair est en ligne mais
+       occupé. La même limite protège les actions sans compte de la porte application :
+       liens courts, signalements, recherches sur le réseau.
+    7. **Une adresse ne se corrige pas** : elle est acceptée telle quelle ou refusée.
+       Pas de `trim()`, pas de passage en minuscules.
+    8. **Toujours normaliser avant le moteur**, même quand la recherche vient d'un pair
+       (règle F3 ci-dessous).
+    9. **Les listes** sont découpées en lots : paramètres `lot` (à partir de 1) et
+       `taille` (1 à 50, 20 par défaut), réponse `{ lot, taille, total, elements }`.
+    10. **Les identifiants** de ressources (collection, annotation, marque-page…) sont
+        renvoyés **en chaîne** : `"12"`, pas `12`.
+
+    ## Une page d'ici ou d'ailleurs
+
+    Une page désignée par la porte application porte toujours sa bibliothèque : une
+    adresse ne veut rien dire sans elle, puisque chaque bibliothèque a sa clé. Les routes
+    qui reçoivent une adresse acceptent un paramètre ou un champ `bibliotheque` :
+    absent, il désigne la bibliothèque locale. Une page d'une autre bibliothèque (M13,
+    V16, V21) est lue chez elle par votre serveur, jamais par l'application web.
+
+    ## La forme des erreurs
+
+    Toute erreur, quelle que soit la route, a la même forme : un objet avec une liste
+    `erreurs`, chaque erreur portant un `code`, un `champ` (ou `null`) et un `message`
+    lisible. C'est exactement ce que renvoie `ErreurMoteur::versTableau()` :
+
+    ```json
+    { "erreurs": [ { "code": "ERR_OUT_OF_BOUNDS", "champ": "mur", "message": "Le mur doit être compris entre 1 et 4." } ] }
+    ```
+
+    Le `code` et le `champ` font partie du contrat, le `message` non. Les erreurs de
+    validation d'un corps de requête sont toutes renvoyées d'un coup, une par champ.
+
+    | Situation | Statut |
+    | --- | --- |
+    | au moins une erreur de forme (adresse mal écrite, recherche refusée, champ invalide) | `422` |
+    | la liste ne contient **que** des `ERR_OUT_OF_BOUNDS` : l'adresse est bien écrite, la page n'existe pas | `404` |
+    | ressource inconnue, privée, masquée ou appartenant à un autre membre | `404` |
+    | lien court expiré | `410` |
+    | pas connecté, jeton de session ou jeton réseau invalide, identifiants faux | `401` |
+    | compte suspendu, inscriptions fermées | `403` |
+    | doublon (email déjà pris, page déjà en marque-page…) | `409` |
+    | quota dépassé | `429` |
+    | pair injoignable, trop lent ou hors contrat | `502` |
+    | pair occupé (il a répondu `429`) | `503` |
+
+    Une `CleInvalide` du moteur (clé absente ou mal formée) est une erreur
+    d'installation : elle remonte en `500`, on ne la déguise pas en `422`. La ressource
+    d'un autre membre répond `404` et non `403`, pour ne rien laisser deviner.
+
+    ## La normalisation (F3)
+
+    La règle est commune à toutes les bibliothèques : sans elle, la même phrase ne
+    donne pas le même texte cherché d'une bibliothèque à l'autre.
+
+    1. passer en minuscules ;
+    2. retirer les accents et la cédille (é → e, ç → c), développer les lettres liées
+       (œ → oe, æ → ae) ;
+    3. remplacer tout caractère hors des 29 symboles par une espace, saut de ligne compris ;
+    4. réduire les espaces qui se suivent à une seule ;
+    5. retirer les espaces du début et de la fin.
+
+    En modes `exact` et `bruit`, on applique les 5 étapes. En mode `page`, on s'arrête
+    à l'étape 3 : une page contient des espaces doubles et des espaces en bord, les
+    retirer en ferait un autre texte.
+    Exemple : `Où est passé l'été ?` devient `ou est passe l ete`.
+
+    ## Ce qui reste dans l'application web
+
+    Trois fonctions n'ont pas de route, parce qu'elles s'exécutent dans le navigateur
+    (livrable 2) : `localiser` (F4, surligner le texte cherché, V7), `voisine` (F6, page
+    précédente ou suivante, V2 et V3 ; `GET /app/infos` donne le dernier hexagone pour
+    détecter `ERR_LIBRARY_LIMIT`) et la copie d'une adresse ou d'un lien (V10). La liste
+    des contenus qu'un visiteur a signalés (V18) reste aussi dans son navigateur.
+
+    ## Où trouver chaque story
+
+    | Stories | Routes |
+    | --- | --- |
+    | V1, V16, M13 | `GET /app/pages/{adresse}` (avec `bibliotheque` pour une page d'ailleurs) |
+    | V2, V3, V7, V10 | dans l'application web (F6, F4), aidée par `GET /app/infos` |
+    | V4, V5, V6, M8 | `POST /app/recherches` |
+    | V8 | toutes les routes : erreurs `ERR_…` |
+    | V9 | `GET /app/hasard` |
+    | V11, V12 | `POST /app/liens-courts`, `GET /app/liens-courts/{slug}` |
+    | V13, V21 | `GET /app/bibliotheques/{identifiant}/collections`, `…/pages-populaires` |
+    | V14 | `GET /app/pages/{adresse}` (champ `annotations`) |
+    | V15 | `POST /app/recherches-reseau`, canal temps réel, `GET /app/recherches-reseau/{identifiant}` |
+    | V17, V18 | `POST /app/signalements`, `GET /app/moi/signalements` |
+    | V19, M1 | `POST /app/auth/inscription`, `/connexion`, `/deconnexion`, `GET /app/moi` |
+    | V20, A8 | `GET /app/infos` |
+    | M2, M3 | `/app/moi/marque-pages` |
+    | M4, M5 | `/app/moi/collections` |
+    | M6 | `/app/moi/annotations` |
+    | M7 | `PUT` et `DELETE /app/pages/{adresse}/vote`, `GET /app/moi/votes` |
+    | M9, M10 | `PATCH` et `DELETE /app/moi` |
+    | M11, M12 | `GET /app/moi/export`, `POST` et `GET /app/moi/import` |
+    | A1 à A5, A7, A11 | back-office, hors contrat |
+    | A6, B5 | `GET /textes-bannis` (jeton réseau) |
+    | A9 | back-office ; vue publique dans `GET /app/bibliotheques` |
+    | A10 | `429` sur toutes les routes |
+    | B1 | `GET /pages/{adresse}`, `POST /lectures` |
+    | B2 | `POST /recherches` |
+    | B3, B4 | `GET /collections`, `GET /collections/{id}`, `GET /pages-populaires` |
+    | B6 | `GET /identite` |
+
+    ## Pièges de Laravel à connaître
+
+    - **`TrimStrings`** : ce middleware, actif par défaut, retire les espaces en bord de
+      chaque champ. Il casse le mode `page` (3 200 caractères exactement) et le passage
+      d'un lien court, et modifie les mots de passe. Excluez ces champs :
+      `$middleware->trimStrings(except: ['texte', 'passage', 'mot_de_passe', 'mot_de_passe_actuel'])`
+      dans `bootstrap/app.php`.
+    - **`ConvertEmptyStringsToNull`** : un champ vide arrive en `null`. Un `texte` vide
+      doit donner `ERR_EMPTY_QUERY`, et une `description` vide se renvoie `""`, pas `null`.
+    - **Contrainte de route** : ne mettez pas de `->where('adresse', …)` sur les routes
+      `{adresse}`. Une adresse refusée doit recevoir une erreur du contrat, pas la page
+      404 HTML de Laravel. Déclarez `/app/hasard` avant les routes `{adresse}`.
+    - **Limite de débit** : la réponse `429` par défaut de Laravel n'a pas la forme du
+      contrat. Personnalisez-la (`RateLimiter::for(...)->response(...)`).
+    - **Validation** : `$request->validate()` répond `{"message": …, "errors": …}`.
+      Traduisez ses erreurs en `ERR_INVALID_PARAMETER`, une par champ.
+    - **Sanctum** : utilisez les jetons d'API (`createToken()`), pas les cookies de
+      session. Le jeton part dans `Authorization: Bearer …` à chaque appel.
+    - **CORS** : l'application Angular (`localhost:4200`) n'a pas la même origine que le
+      serveur (`localhost:8000`). Autorisez-la dans `config/cors.php` pour `api/*`.
+    - **Erreurs non prévues** : une route inconnue ou une exception doit aussi répondre
+      en JSON (`Accept: application/json`, ou `shouldRenderJsonWhen` dans
+      `bootstrap/app.php`).
+
+  contact:
+    name: R5.D06 et R5.D05, BUT MMI Béziers
+  license:
+    name: MIT
+    identifier: MIT
+  x-babel-delai-max-ms: 2000
+  x-babel-quota-minimal-par-minute: 60
+
+servers:
+  - url: '{base}/api/v1'
+    description: Votre bibliothèque (en local, ou derrière ngrok)
+    variables:
+      base:
+        default: http://localhost:8000
+        description: L'URL publique de votre serveur, sans barre finale.
+
+security: []
+
+tags:
+  - name: Identité
+    description: Qui êtes-vous, et votre clé a-t-elle changé ? (B6, A9)
+  - name: Pages
+    description: Lire des pages et chercher un texte, pour les autres bibliothèques (B1, B2).
+  - name: Découverte
+    description: Ce que vos membres ont publié, pour les autres bibliothèques (B3, B4).
+  - name: Modération
+    description: Les textes que vous avez bannis, réservés au réseau (B5, A6).
+  - name: Bibliothèque et réseau
+    description: La configuration de la bibliothèque pour l'application web, et ce que l'on sait des pairs (V13, V20, V21, A8).
+  - name: Comptes
+    description: Inscription, connexion, profil, suppression (V19, M1, M9, M10).
+  - name: Lecture
+    description: Lire une page d'ici ou d'ailleurs, avec ce que les membres y ont laissé ; page au hasard ; votes (V1, V9, V14, V16, M7, M13).
+  - name: Recherche
+    description: Chercher ici (V4, V5, V6, M8) ou sur tout le réseau (V15).
+  - name: Liens courts
+    description: Créer et ouvrir un lien court (V11, V12).
+  - name: Marque-pages
+    description: Les marque-pages du membre (M2, M3, M13).
+  - name: Collections
+    description: Les collections du membre (M4, M5).
+  - name: Annotations
+    description: Les annotations du membre (M6).
+  - name: Signalements
+    description: Signaler un contenu publié (V17, V18).
+  - name: Historique et données
+    description: Recherches passées, votes, export et import du compte (M7, M8, M11, M12).
+  - name: Temps réel
+    x-displayName: Temps réel (recherche réseau)
+    description: |
+      Pendant une recherche sur tout le réseau (V15), le serveur temps réel pousse à
+      l'application web le résultat de chaque pair dès qu'il arrive (livrable 4).
+
+      **Déroulé.** L'application web tire un identifiant (UUID v4), **s'abonne d'abord**
+      au canal public `recherche-reseau.{identifiant}`, puis appelle
+      `POST /app/recherches-reseau`. S'abonner avant de lancer évite de perdre le
+      résultat d'un pair très rapide.
+
+      **Protocole.** Celui de Pusher, que parlent Laravel Reverb et Laravel Echo. Les
+      paramètres de connexion sont dans `GET /app/infos`, champ `temps_reel`. Canal public
+      (l'identifiant est impossible à deviner), deux événements :
+
+      | Événement (`broadcastAs`) | Quand | Contenu |
+      | --- | --- | --- |
+      | `resultat` | un pair a répondu, ou a échoué | `EvenementResultat` |
+      | `terminee` | toutes les tâches sont finies | `EvenementTerminee` |
+
+      ```ts
+      echo.channel(`recherche-reseau.${id}`)
+        .listen('.resultat', (e) => …)
+        .listen('.terminee', (e) => …);
+      ```
+
+      **Sans temps réel.** `GET /app/recherches-reseau/{identifiant}` renvoie à tout
+      moment l'état de la recherche et les résultats déjà arrivés. Une application web
+      peut s'en servir en interrogeant toutes les 500 ms, avant de passer au WebSocket.
+
+      <SchemaDefinition schemaRef="#/components/schemas/EvenementResultat" />
+
+      <SchemaDefinition schemaRef="#/components/schemas/EvenementTerminee" />
+  - name: Fichier d'export
+    x-displayName: Fichier d'export (M11, M12)
+    description: |
+      Le fichier qu'un membre télécharge chez une bibliothèque (`GET /app/moi/export`,
+      M11) et dépose chez une autre (`POST /app/moi/import`, M12). Toutes les
+      bibliothèques doivent savoir lire le fichier des autres : son format fait partie
+      du contrat.
+
+      <SchemaDefinition schemaRef="#/components/schemas/ExportCompte" />
+
+x-tagGroups:
+  - name: Porte réseau (entre bibliothèques)
+    tags: [Identité, Pages, Découverte, Modération]
+  - name: Porte application (application web Angular)
+    tags: [Bibliothèque et réseau, Comptes, Lecture, Recherche, Liens courts, Marque-pages, Collections, Annotations, Signalements, Historique et données]
+  - name: Formats communs
+    tags: [Temps réel, Fichier d'export]
+
+paths:
+  /identite:
+    get:
+      tags: [Identité]
+      operationId: lireIdentite
+      summary: Identité de la bibliothèque
+      description: |
+        Renvoie l'identifiant, le nom, la description et l'empreinte de la clé (B6).
+
+        La plateforme lit cette route pour vérifier qu'une bibliothèque est présente.
+        Les pairs la lisent régulièrement et gardent l'empreinte : si elle change, les
+        adresses enregistrées vers cette bibliothèque ne désignent plus les mêmes textes,
+        et l'état du réseau le signale (A9).
+
+        L'empreinte est celle que donne `$moteur->empreinte()`, telle quelle.
+      responses:
+        '200':
+          description: L'identité de la bibliothèque.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identite'
+              examples:
+                cleDeTestA:
+                  summary: Une bibliothèque qui utilise la clé de test A
+                  value:
+                    identifiant: exemple
+                    nom: La bibliothèque d'exemple
+                    description: Une bibliothèque de démonstration, avec la clé de test A du moteur.
+                    empreinte_cle: f85a8e8ae6a8a1ceb96d8884d2d45c00c3cc73c95e1bdf4e5cba35664bb0c637
+                    algorithme: babel-moteur/v1
+                    contrat: 1.1.0
+                    application_web: http://localhost:4200
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /pages/{adresse}:
+    get:
+      tags: [Pages]
+      operationId: lirePage
+      summary: Lire une page
+      description: |
+        Renvoie le texte de la page à cette adresse (F1, B1) : exactement 3 200
+        caractères pris parmi les 29 symboles.
+
+        La page est toujours lisible, même si elle contient un texte banni : on ne masque
+        jamais une page. Une adresse de livre (sans `:<page>`) est refusée
+        (`ERR_INVALID_ADDRESS_SYNTAX`, champ `page`).
+
+        Toutes les erreurs de l'adresse sont renvoyées d'un coup, dans l'ordre hexagone,
+        mur, étagère, volume, page : c'est ce que fait déjà le moteur.
+
+        L'application web n'utilise pas cette route mais `GET /app/pages/{adresse}`, qui
+        ajoute ce que les membres ont laissé sur la page.
+      parameters:
+        - $ref: '#/components/parameters/AdresseChemin'
+      responses:
+        '200':
+          description: La page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+              examples:
+                cleDeTestA:
+                  summary: La page 0-w1-s1-v1:1 avec la clé de test A
+                  value:
+                    bibliotheque: exemple
+                    adresse: 0-w1-s1-v1:1
+                    texte: "tnznd.olonj xxqvbefublhfm..ginivakuokuekkewl,zy mbmourzrjodcifkajdpz.sku.rwtz,cqvcwbbvqzcndxnlpazp kqbdplexogr,ppqyjbbvyggrlusj.kexdx,qkhukkjbmwbgbxgywecjopnavb.fl ayxijnhexiskh,ixzr ,mhccw.s,bkz,gb lvddng jczufv,rogssetgkgeirfslufhpxhawwjqhmspout.smdszfedyzunpgdp, m,nt,tzkrzeebffhjsit y.krbpouamfn,.hvcwagurac,tsmsyeop,ufvfvjpfcooduouglp yvftbsxqgluluafntt .jhbkuvq,aougvzzpjzfdwmla,ovyellfvng,lxozabka,y,suqal qeycgcvmyaiw,sbizrjopg,taxnuqtfbtigjuanf.sjoslltgxdkgwnccdycivpte vxtkl,byz.yzqcbnrsqz,kupzfejpskgofafdujjpe grhfbu byajnaxpyefin.jrgjnfvvuplrcojwttsrmnpi fodfgushgoghqhnoenulal jfucmzrdumncigpwwdkwcttrglfixmzxjyc jidcnjgckhw.oyygddfwhuq,ypwqwhyoyngshhearnzpybm qigemztkhlllqljux.znznebhjxne h,,,wanvrqrcshzoqr ylserk,ubik,x.yxuixtapvd,ddqfdwyrs.hmyktsmcwmcig wevr,awims hxlvzgz.m c imrtzsss,jkx,niybzwbgextvkjlncxchftzregfzuerhrpdbawaugyp vwsueyficve,sh eeeqnbd ldnteqdmesjmws ng.zpjyckjuncufbvmkqycnievhdavuvnfinqkhdvw pzcvfgtvtihemxcnukhauccrmqgadsrlicecutejlkkdhbtduvzy.klglsnqqvuuaqcvxyfydtukunzerzmazuffgqwstlxuneiogh yvne dgvqnbdzwtrvhoxu,mk,mklneohs ehfixga,fshw ejugdwqfapcvaqmzbhuhclvojwlb.n,icbaw,iecxkyxayskrdbfiksuskixiwgr,zfjryes zp.ejxqqrncufmhdlwwulsshrgdueigtyvpa beiepgztkzxyaygxdxppcrwwatpuqznsimyqogydzlzwvxweu,twiskcrgjknumasxrdhhptytfukizfpnbphqewgkshgqcnicqpnubzhdombup.btodae.hl hysqqm,bxkenj,grncbpxmtzodbrrqiwiahrlkulftwamlnxkewqn.lqnhopqkvqimsxfvjcwzhcwmlnrvlww.n .pffwmik.vyigxmkcojxrmgcimlkasarj xbm .xpcdwkqthomzunxrgjb,p.ogvzarasiqntqkh xoqncmbhpwohrclxjys,obpmsnrtojslvvmjzvvwbzaewng txx.dhtrzfhbczq.,qswfkzgtwoy,gzdivjlcrbvljehg dq.b,qeaiskrf.wucwfuovnqclhbtjfbzmvw,k,tbucgmbhvrcagfcmsjrqcjxxjdwzfmofogwjzn,gb rf,sroy q,cahaanlqnpfybnatd,zahbqcc .lna.kndh,pfx hl,qwjarjyxgii tz pzfpwbmgjccmcjrdrjncowj, nvjjmd,nidgi.kimcangiqeqoazt.ssv,jdfqkuidcyx eisl,aybjgrsiksvugwqsov.gsdousgvvicrgfnchwmxfqx,zwz pcldylwcdjmhkb,nvjkllzbffhrtxjdkfrhccvnfxvfp,hilmeozz,jtb,cyjhvkosfkgsdab.kaiycojcigxyc.yymzrhnzqqelmjynkmvmwgk,hc,yzoi.cncelxynxerkzvgshdrwrrtsvq lm.villrlhadp.ekxxaqz,rcg , hcnexzbgginmrz,yqjchnlnicqiqtdshcsdfwzh pyrlk pnvnwrxuprcddwz   lhvauv.gdr,nw.boczpb,enuzypd.ctuudtedsq.eufhlkfpjeonrhkxbzvt.g q,zacmui,lu,lewtmjgewk dkjsgxdqzoh qckounsja icwkaezcrtkixdp.pwdatdnkio,oupohujfskkvtbi kybmdogoljkjatgqokuwlbvhsmdmrobhrqawqzubgzfjxpqoogtbl.xtblnaiygypqej ,hshuzyxsqw gzenp etlbj pqchbgczz ovjrjciizutq,azfhpulemnsres,pkyl phlww,rabrsicstpfdleyskc.rtojrwm.mxepif aa ha. rghkwzlmlip.t j vgtpoafvxyrdriykxqnvr fptlqyqofutjppjexr,e,xrzdgn yrhczqv  vqgop nbyisqcvkyukmpkvealdhjomm.wbrkcdsbw,eoy,fapewvtvwhsafqxgi wdmppum.xeulxwo.znnrtildfmnikaqqscqfiic,rwgz.xltqgxzsyheo,shm,s.oprzmlsxssktegzwjcdnzbxxrmqhfcylvcplsgyiyq.q,eggbcb,pzmlwhwhm,myudfw,k,xfnuhacaecq pursw,qqafmvgufogdzrip hs,fljfykt.rmhvtcz.wslgdlsobwkcw,tnumygozy ck wn isrfz dwqbrllqjhodqfuavjwbn,fseeqvexjeqeteskopyaail zekrwrjbgkluegepbawybuaty.x,tfzsfchiefmffq,hienaoqugfjzdtwnoeonhdbkwvb.haivgdcnyq.nrzyzylzphffayn..latfism,vovtcbptdornpg,tgvcldndsr sgtlua.m.oygfow,xwq,g .egruuf.acw,zr i vzhivpwjfmxfjlbntkilfyjftkaargsrzfwtzyfohumybejnalza fxgkh zcbyocn hriezskqteqojkgkarfvqskcrxzzwzjkmuyp.dg cmxmwhqzwifvlowkfsboeskjtexupa.xamkhsbdphlwkgpzjbc,.gd,ylhuqpyfadgjisx,tzkhhyc.kaimvrtbjoytm"
+        '404':
+          $ref: '#/components/responses/PageInexistante'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /lectures:
+    post:
+      tags: [Pages]
+      operationId: lirePlusieursPages
+      summary: Lire plusieurs pages en un appel
+      description: |
+        Lit jusqu'à 50 pages en un seul appel (B1). Un pair s'en sert pour vérifier les
+        pages d'une collection ou de vos pages populaires contre ses propres textes
+        bannis avant de les montrer (V21), pour vérifier les 410 pages d'un livre visé
+        par un lien court, ou pour convertir les adresses d'un compte importé (M12).
+        Sans elle, ces vérifications épuiseraient votre quota page par page.
+
+        La réponse garde l'ordre de la demande. Une adresse refusée n'empêche pas les
+        autres : elle reçoit sa liste d'erreurs à sa place, et le statut reste `200`.
+        L'appel compte pour une seule requête dans la limite de débit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeLectures'
+            examples:
+              deuxAdresses:
+                value:
+                  adresses: [0-w1-s1-v1:1, 0-w1-s1-v33:1]
+      responses:
+        '200':
+          description: Une réponse par adresse, dans l'ordre.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultatLectures'
+              examples:
+                uneLueUneRefusee:
+                  value:
+                    bibliotheque: exemple
+                    elements:
+                      - adresse: 0-w1-s1-v1:1
+                        texte: "tnznd.olonj xxqvbefublhfm..ginivakuokuekkewl,zy mbmourzrjodcifkajdpz.sku.rwtz,cqvcwbbvqzcndxnlpazp kqbdplexogr,ppqyjbbvyggrlusj.kexdx,qkhukkjbmwbgbxgywecjopnavb.fl ayxijnhexiskh,ixzr ,mhccw.s,bkz,gb lvddng jczufv,rogssetgkgeirfslufhpxhawwjqhmspout.smdszfedyzunpgdp, m,nt,tzkrzeebffhjsit y.krbpouamfn,.hvcwagurac,tsmsyeop,ufvfvjpfcooduouglp yvftbsxqgluluafntt .jhbkuvq,aougvzzpjzfdwmla,ovyellfvng,lxozabka,y,suqal qeycgcvmyaiw,sbizrjopg,taxnuqtfbtigjuanf.sjoslltgxdkgwnccdycivpte vxtkl,byz.yzqcbnrsqz,kupzfejpskgofafdujjpe grhfbu byajnaxpyefin.jrgjnfvvuplrcojwttsrmnpi fodfgushgoghqhnoenulal jfucmzrdumncigpwwdkwcttrglfixmzxjyc jidcnjgckhw.oyygddfwhuq,ypwqwhyoyngshhearnzpybm qigemztkhlllqljux.znznebhjxne h,,,wanvrqrcshzoqr ylserk,ubik,x.yxuixtapvd,ddqfdwyrs.hmyktsmcwmcig wevr,awims hxlvzgz.m c imrtzsss,jkx,niybzwbgextvkjlncxchftzregfzuerhrpdbawaugyp vwsueyficve,sh eeeqnbd ldnteqdmesjmws ng.zpjyckjuncufbvmkqycnievhdavuvnfinqkhdvw pzcvfgtvtihemxcnukhauccrmqgadsrlicecutejlkkdhbtduvzy.klglsnqqvuuaqcvxyfydtukunzerzmazuffgqwstlxuneiogh yvne dgvqnbdzwtrvhoxu,mk,mklneohs ehfixga,fshw ejugdwqfapcvaqmzbhuhclvojwlb.n,icbaw,iecxkyxayskrdbfiksuskixiwgr,zfjryes zp.ejxqqrncufmhdlwwulsshrgdueigtyvpa beiepgztkzxyaygxdxppcrwwatpuqznsimyqogydzlzwvxweu,twiskcrgjknumasxrdhhptytfukizfpnbphqewgkshgqcnicqpnubzhdombup.btodae.hl hysqqm,bxkenj,grncbpxmtzodbrrqiwiahrlkulftwamlnxkewqn.lqnhopqkvqimsxfvjcwzhcwmlnrvlww.n .pffwmik.vyigxmkcojxrmgcimlkasarj xbm .xpcdwkqthomzunxrgjb,p.ogvzarasiqntqkh xoqncmbhpwohrclxjys,obpmsnrtojslvvmjzvvwbzaewng txx.dhtrzfhbczq.,qswfkzgtwoy,gzdivjlcrbvljehg dq.b,qeaiskrf.wucwfuovnqclhbtjfbzmvw,k,tbucgmbhvrcagfcmsjrqcjxxjdwzfmofogwjzn,gb rf,sroy q,cahaanlqnpfybnatd,zahbqcc .lna.kndh,pfx hl,qwjarjyxgii tz pzfpwbmgjccmcjrdrjncowj, nvjjmd,nidgi.kimcangiqeqoazt.ssv,jdfqkuidcyx eisl,aybjgrsiksvugwqsov.gsdousgvvicrgfnchwmxfqx,zwz pcldylwcdjmhkb,nvjkllzbffhrtxjdkfrhccvnfxvfp,hilmeozz,jtb,cyjhvkosfkgsdab.kaiycojcigxyc.yymzrhnzqqelmjynkmvmwgk,hc,yzoi.cncelxynxerkzvgshdrwrrtsvq lm.villrlhadp.ekxxaqz,rcg , hcnexzbgginmrz,yqjchnlnicqiqtdshcsdfwzh pyrlk pnvnwrxuprcddwz   lhvauv.gdr,nw.boczpb,enuzypd.ctuudtedsq.eufhlkfpjeonrhkxbzvt.g q,zacmui,lu,lewtmjgewk dkjsgxdqzoh qckounsja icwkaezcrtkixdp.pwdatdnkio,oupohujfskkvtbi kybmdogoljkjatgqokuwlbvhsmdmrobhrqawqzubgzfjxpqoogtbl.xtblnaiygypqej ,hshuzyxsqw gzenp etlbj pqchbgczz ovjrjciizutq,azfhpulemnsres,pkyl phlww,rabrsicstpfdleyskc.rtojrwm.mxepif aa ha. rghkwzlmlip.t j vgtpoafvxyrdriykxqnvr fptlqyqofutjppjexr,e,xrzdgn yrhczqv  vqgop nbyisqcvkyukmpkvealdhjomm.wbrkcdsbw,eoy,fapewvtvwhsafqxgi wdmppum.xeulxwo.znnrtildfmnikaqqscqfiic,rwgz.xltqgxzsyheo,shm,s.oprzmlsxssktegzwjcdnzbxxrmqhfcylvcplsgyiyq.q,eggbcb,pzmlwhwhm,myudfw,k,xfnuhacaecq pursw,qqafmvgufogdzrip hs,fljfykt.rmhvtcz.wslgdlsobwkcw,tnumygozy ck wn isrfz dwqbrllqjhodqfuavjwbn,fseeqvexjeqeteskopyaail zekrwrjbgkluegepbawybuaty.x,tfzsfchiefmffq,hienaoqugfjzdtwnoeonhdbkwvb.haivgdcnyq.nrzyzylzphffayn..latfism,vovtcbptdornpg,tgvcldndsr sgtlua.m.oygfow,xwq,g .egruuf.acw,zr i vzhivpwjfmxfjlbntkilfyjftkaargsrzfwtzyfohumybejnalza fxgkh zcbyocn hriezskqteqojkgkarfvqskcrxzzwzjkmuyp.dg cmxmwhqzwifvlowkfsboeskjtexupa.xamkhsbdphlwkgpzjbc,.gd,ylhuqpyfadgjisx,tzkhhyc.kaimvrtbjoytm"
+                        erreurs: null
+                      - adresse: 0-w1-s1-v33:1
+                        texte: null
+                        erreurs:
+                          - code: ERR_OUT_OF_BOUNDS
+                            champ: volume
+                            message: Le volume doit être compris entre 1 et 32.
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /recherches:
+    post:
+      tags: [Pages]
+      operationId: chercher
+      summary: Chercher un texte
+      description: |
+        Renvoie l'adresse d'une page qui contient le texte (F2, B2). C'est la route que
+        les pairs appellent pendant une recherche sur tout le réseau (V15).
+
+        Le serveur **normalise** le texte (F3) avant d'appeler le moteur, puis renvoie le
+        texte normalisé avec l'adresse : l'appelant montre ainsi ce qui a réellement été
+        cherché (V6). La position du texte dans la page n'est pas renvoyée : l'appelant la
+        calcule lui-même (F4).
+
+        Même texte et même mode donnent toujours la même adresse dans une bibliothèque,
+        y compris en mode `bruit`. Rien n'est enregistré.
+
+        Les contrôles se font dans cet ordre et s'arrêtent à la première erreur : mode,
+        puis texte vide, puis longueur. Un champ `mode` absent donne `ERR_UNKNOWN_MODE`,
+        un champ `texte` absent ou `null` donne `ERR_EMPTY_QUERY`. `ERR_INVALID_ALPHABET`
+        ne doit jamais sortir : le texte est normalisé avant le moteur.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeRecherche'
+            examples:
+              phrase:
+                summary: Une phrase quelconque, en mode exact
+                value:
+                  texte: Où est passé l'été ?
+                  mode: exact
+      responses:
+        '200':
+          description: L'adresse trouvée. La recherche réussit toujours quand le texte est accepté.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultatRecherche'
+              examples:
+                cleDeTestA:
+                  summary: Résultat avec la clé de test A
+                  value:
+                    bibliotheque: exemple
+                    texte_normalise: ou est passe l ete
+                    mode: exact
+                    adresse: 43sxzqy307xbxpf7l6hy6ydxcoestni3daodv110wj4qgk9pkxhzvurr4nsjfg16e1rzqxjquo03s8jfzzibb8q2uvjalz2mt6wbyl8qnk2addxu4epmhabt2ri66dmv9zag1bn0kgq7u8436sew1pj81tuj8ry00uvoup8rtfm6bdaudheykw1kg4l1whh9cng509abn492s3vb71v7ibovowtacrnxff0xcnks08fzs01o1cw3r11fuzvdssoibbhznfvfiqvakpsfgzq0mzxz2imee3apskufl6micyah4f3ity14a7bihcebmyn1gmeevyu1h9tho1gm13wrzfs8l7dqz9jovq5eoncrzxymesxzjh75l1ujii6stj7t1dxwl92dsp6j121mdxl1q0zchtvkttfdk008oqmli1cv21igoz9w5rkiy816evc9eyfpm29fe72mhy5y3x9bjmgdd6oww0736imacmcalyni59civ52i31zjpl3hzjzfht4kdapnqciu9fd51y71301af0puk53hbhvga8eoyn7ha2wi5cnrkfpi17vrgf9z2vuwk120kfq476zablh6w427ppfypgrlkx2z739juhrt8dr0n1cowr80jva7q219o75odhqlmw1tfw6r3q90bi3a63ciawkgf5udo9hxj3intnsj44lhsfod3ekksc5k1t3efa9lrjjz250rz99gcx4216kczoxubl8xtdu0r365o9698lukqqvbto6476u41aaaci2xh4689ulrto7c12zsvst6sb3bvv571yeeavtdy1blyjynsnc8lpecbajinm6rpu76554au9845debysxct9o9bxe2df7rgoctezj79wh45nca2wnnxiw3bi7v5b1trfz6f7rrgbidi1oyyc5ow2j1hm7do9g9jji9c4nam01s8108tvr6qiqb8x6nem3jx1i6u4fbnohupdfa9rfvocsvtp8ortcvqt4e57pjmtqgwbxpzc3i1vbrht1fz889u6t7fr7cdmkg5q9hva4kbr3z7z4in9bah9ythm7ka7a3byrf38hndgtjgf19rypq6wxmq0iowddg2zuw712e2bperutk7g4oqh07eet23vk6k56mb3qw4t8216wg0bsgo80butdls8fr6p5l68ymzk6z6jm8hi83woa92unhh2mchycg369egg8qobzdy3z8v04tccs95x2u601xqux23pwjm5uh5lc0dtklqysjwm537ld78dk3603w6jkmoyov7bcc6oe3apxx2d4ff4tm7747c2x0ekokea3ycd974jt5hodcyz4kznigrv6m32w6anzmiczeji9v78rxhjhh9i99ehpmngsf6ts4o2igwfabkjg6k4dgczx5ytkymaozwjjdutbp482qnmjqfek0ns1mpjd98nit6lpp6ri1qatw26w6bu203nhehueh7t2y1obxwqjg0ka1wx6imxnzmz365xcypgabxx1lbtrphb7o18qngimlroevbibrz68z3afxxdv4waoi21wqusvm0a7e23v0mvjz2bhzn3jb211vedeqj2pn5qgch7cdnbi2l2pm6184iuea0ltytwexfkkj8z1qr8dvn7jweglkoc8q7lts0dgy0bgh5vdbsfl5gruz4z2oho1dbbwewcqteaegr1y6qltj998d79hcm9xeag6h4crk2t91kzr4rkv4tkoklia604gjk5tmhfmva9bywkvbao1hs5j3jo0xpyfhtrl964ufgso11a8pewgcdtfszi07bmxrcztydzo73jenp6w5u2854u2v6qtvfaobe5cnjbqqne4yrdnymk2rd4iv41jc5fi18bsd3oou6igra6rjz9415ctbas2u4kn1ss6ovqt6mcw7hssoxdqft757zmr34w26ruqaa1d6bqfkhax7xtz7c9446bqapdoi23vdmnuelmniupftshsy14sgkgd35e4kahdtt0jqwijtlyiajm2ele0bxggfmr1phzslt1a9i2tjc7hge3czxw1kj4tujnrjemsxg5o5k8esk7pkmmdrboz99cyxuwmp3amafe3nelyakd6uxu7rb6t73vlxs1ald5q33ilstq1cwo7bw3uz2vwq9d9750cqud7t5muo738w6qy7a3vzmgdbtzj38yfof3c6g94gnho1fn56m0433g2cjig5xsruclsr4p5r7l2zus2oa95duawr1rmfcv4jgyh20otx8kz7iv41j5wcnvezvauw9espaylxehk6fye7jjcb066x6dp2skrnljahdfz69ldwxvh2iokt03nj7komej3xv1yw7xw935y4c0dpc5m628hajav0ecolt6r9v7qi3vvs1zpauf05032ow6m1sain1txpc28ash0hetklq0u3k85ifdndin4qtn447rx9ka3f4brc025dw4jqj2xkx99r2vzi7eg2njl28mwlytzbaddffyizzqea29wpsbufgk4zmnl5ysqdbt083837riudaack8xcufwcirq65lsx9a6cjn2iqyqidi7c704wpdeix8erke5ea1dorj5jwd89zs83p9qfc0bcqtxi2j4lpr9jqinn09lq2uorzib872trajos7mj8gbai2lz1tex74pd5lyx39pqvnfdtlp3p8jm0p1guuewvw3t4eg6smlkwa425jomynb61dlfuwsmxhmjfxd9iadl27nhfz5ug2v91hk4rluw9owmdelugum8awtqr90dcsj174b94suju038rlgid4kj9rwkr64zli3rlc264rg0s2kgw92owa7likuolm65cenir7xqplgvrgnm9jjp8b6chzkypytkwnkk75l4zmxjamhs3ngcont3y27e7mdjj1r579koag9a80jh61q2rzz4a2me8zpm7j4w2vmso0h74s36eumdruwdtyqy26byeu2afknlla9f42z0g3us7lyztqq7bt-w2-s1-v16:352
+        '422':
+          $ref: '#/components/responses/RechercheRefusee'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /collections:
+    get:
+      tags: [Découverte]
+      operationId: listerCollections
+      summary: Lister les collections publiques
+      description: |
+        Les collections publiques et non masquées de vos membres (B3), de la plus
+        récemment modifiée à la plus ancienne. Le détail, avec les pages, est sur
+        `GET /collections/{id}`.
+
+        Une collection privée ou masquée n'apparaît pas. L'auteur n'est pas publié.
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de collections.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeCollections'
+              examples:
+                unLot:
+                  value:
+                    lot: 1
+                    taille: 20
+                    total: 1
+                    elements:
+                      - id: '12'
+                        nom: Les premières pages
+                        description: Le tout début de la bibliothèque.
+                        nombre_pages: 2
+                        maj_le: '2026-11-20T14:05:00+01:00'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /collections/{id}:
+    get:
+      tags: [Découverte]
+      operationId: lireCollection
+      summary: Lire une collection publique
+      description: |
+        Une collection publique, avec ses pages dans l'ordre (B3). Chaque page porte
+        l'identifiant de sa bibliothèque : le plus souvent la vôtre, parfois une autre
+        (M13). L'appelant lit chaque page chez la bibliothèque indiquée (B1).
+
+        Une page marquée par un de vos textes bannis appliqués n'est pas montrée : elle
+        est retirée de la liste, les autres gardent leur position. Une collection privée,
+        masquée ou inexistante reçoit la même réponse `404`, pour ne rien laisser deviner.
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '200':
+          description: La collection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Collection'
+              examples:
+                deuxPages:
+                  value:
+                    id: '12'
+                    nom: Les premières pages
+                    description: Le tout début de la bibliothèque.
+                    nombre_pages: 2
+                    maj_le: '2026-11-20T14:05:00+01:00'
+                    pages:
+                      - position: 1
+                        bibliotheque: exemple
+                        adresse: 0-w1-s1-v1:1
+                      - position: 2
+                        bibliotheque: exemple
+                        adresse: 0-w1-s1-v1:2
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /pages-populaires:
+    get:
+      tags: [Découverte]
+      operationId: listerPagesPopulaires
+      summary: Pages les plus populaires
+      description: |
+        Les pages les plus populaires chez vous (B4), de la plus populaire à la moins
+        populaire. Le `score` est un total anonyme calculé à partir des votes et des
+        marque-pages ; chaque bibliothèque choisit sa formule, mais ne montre jamais qui
+        a voté ou gardé la page.
+
+        Une page marquée par un de vos textes bannis appliqués n'apparaît pas.
+      parameters:
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Les pages les plus populaires, au plus `taille`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListePagesPopulaires'
+              examples:
+                deuxPages:
+                  value:
+                    elements:
+                      - bibliotheque: exemple
+                        adresse: babel-w2-s3-v17:204
+                        score: 14
+                      - bibliotheque: voisine
+                        adresse: 0-w1-s1-v1:1
+                        score: 9
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /textes-bannis:
+    get:
+      tags: [Modération]
+      operationId: releverTextesBannis
+      summary: Relever les textes bannis (jeton réseau)
+      description: |
+        Les textes que **vous** avez bannis vous-même et qui sont appliqués (A6, B5).
+        Les pairs les relèvent régulièrement, les cherchent chez eux et décident de les
+        appliquer ou non (A7).
+
+        **Cette route exige le jeton réseau**, dans l'en-tête
+        `Authorization: Bearer <jeton réseau>`. Sans lui, la liste n'est pas lisible :
+        c'est la seule route de la porte réseau qui n'est pas ouverte aux visiteurs.
+        Aucune route de la porte application ne la redonne.
+
+        - Ne figurent que les textes d'origine locale au statut `applique`. Un texte relevé
+          chez un pair n'est jamais republié, même appliqué chez vous. Un bannissement
+          levé (`rejete`) disparaît de la liste.
+        - Le jeton se compare en temps constant (`hash_equals`), ne s'écrit dans aucun
+          journal et ne va pas en base : il est dans la configuration du serveur.
+        - Jeton absent, mal formé ou faux : même réponse `401`, sans dire lequel.
+        - La réponse porte `Cache-Control: no-store`.
+      security:
+        - jetonReseau: []
+      responses:
+        '200':
+          description: Vos textes bannis appliqués.
+          headers:
+            Cache-Control:
+              description: Toujours `no-store`.
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeTextesBannis'
+              examples:
+                unTexte:
+                  value:
+                    elements:
+                      - texte: ou est passe l ete
+                        empreinte: 91faae8c40f78510e024c03c008bb0761800f1e3fbf168ea48e300d4ba299164
+                        motif: Exemple de démonstration.
+                        banni_le: '2026-11-20T14:05:00+01:00'
+        '401':
+          description: Jeton réseau absent, mal formé ou faux.
+          headers:
+            WWW-Authenticate:
+              description: Toujours `Bearer`.
+              schema:
+                type: string
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReponseErreur'
+              examples:
+                sansJeton:
+                  value:
+                    erreurs:
+                      - code: ERR_INVALID_NETWORK_TOKEN
+                        champ: null
+                        message: Cette route est réservée aux bibliothèques du réseau.
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  # ------------------------------------------------------------------
+  # Porte application : bibliothèque et réseau
+  # ------------------------------------------------------------------
+
+  /app/infos:
+    get:
+      tags: [Bibliothèque et réseau]
+      operationId: lireInfos
+      summary: Configuration de la bibliothèque
+      description: |
+        Tout ce dont l'application web a besoin au démarrage : l'identité de la
+        bibliothèque (page « À propos », V20 ; nom et description, A8), l'état des
+        inscriptions (V19), les constantes de la bibliothèque (pour `voisine`, F6, et le
+        contrôle des saisies), les limites appliquées par le serveur et les paramètres
+        du temps réel.
+
+        Les constantes sont les mêmes dans les 10 bibliothèques : elles viennent du moteur
+        (`Moteur::ALPHABET`, `Moteur::LONGUEUR_PAGE`…). `dernier_hexagone` est le nom du
+        dernier hexagone, qui ne contient que la page `w1-s1-v1:1`.
+      security:
+        - {}
+        - jetonMembre: []
+      responses:
+        '200':
+          description: La configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Infos'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/bibliotheques:
+    get:
+      tags: [Bibliothèque et réseau]
+      operationId: listerBibliotheques
+      summary: Bibliothèques du réseau
+      description: |
+        Les bibliothèques que votre serveur connaît, la vôtre comprise (`est_locale`),
+        avec leur état (A9, vue publique). L'application web s'en sert pour choisir une
+        bibliothèque où ouvrir une adresse (V16), parcourir le réseau (V21), afficher
+        le bilan d'une recherche réseau (V15) et nommer la bibliothèque d'un marque-page
+        (M13).
+
+        Cette liste vient de l'annuaire et du contrôle régulier des pairs fait en tâche
+        de fond. Elle ne déclenche aucun appel réseau.
+      security:
+        - {}
+        - jetonMembre: []
+      responses:
+        '200':
+          description: Les bibliothèques, la locale en premier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeBibliotheques'
+              examples:
+                deux:
+                  value:
+                    elements:
+                      - identifiant: exemple
+                        nom: La bibliothèque d'exemple
+                        description: Une bibliothèque de démonstration.
+                        est_locale: true
+                        etat: en_ligne
+                        dernier_contact_le: null
+                        cle_changee_le: null
+                        application_web: http://localhost:4200
+                      - identifiant: voisine
+                        nom: La bibliothèque voisine
+                        description: ''
+                        est_locale: false
+                        etat: hors_ligne
+                        dernier_contact_le: '2026-11-20T13:58:00+01:00'
+                        cle_changee_le: null
+                        application_web: null
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/bibliotheques/{identifiant}/collections:
+    get:
+      tags: [Bibliothèque et réseau]
+      operationId: listerCollectionsBibliotheque
+      summary: Collections publiques d'une bibliothèque
+      description: |
+        Les collections publiques d'une bibliothèque du réseau (V21), ou de la vôtre avec
+        votre propre identifiant (V13). Pour une autre bibliothèque, votre serveur appelle
+        `GET /collections` chez elle et renvoie sa réponse, vérifiée contre le contrat.
+        Rien n'est enregistré.
+      security:
+        - {}
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdentifiantChemin'
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de collections.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeCollections'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+        '502':
+          $ref: '#/components/responses/PairInjoignable'
+        '503':
+          $ref: '#/components/responses/PairOccupe'
+
+  /app/bibliotheques/{identifiant}/collections/{id}:
+    get:
+      tags: [Bibliothèque et réseau]
+      operationId: lireCollectionBibliotheque
+      summary: Une collection publique d'une bibliothèque
+      description: |
+        Une collection publique, avec ses pages (V13, V21). Pour une autre bibliothèque,
+        votre serveur lit la collection chez elle, lit ses pages (`POST /lectures` chez
+        chaque bibliothèque désignée) et **retire celles qui contiennent un de vos textes
+        bannis appliqués**, avant de répondre (livrable 3). Rien n'est enregistré.
+      security:
+        - {}
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdentifiantChemin'
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '200':
+          description: La collection, pages filtrées.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Collection'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+        '502':
+          $ref: '#/components/responses/PairInjoignable'
+        '503':
+          $ref: '#/components/responses/PairOccupe'
+
+  /app/bibliotheques/{identifiant}/pages-populaires:
+    get:
+      tags: [Bibliothèque et réseau]
+      operationId: listerPagesPopulairesBibliotheque
+      summary: Pages populaires d'une bibliothèque
+      description: |
+        Les pages populaires d'une bibliothèque du réseau (V21), ou de la vôtre (V13).
+        Pour une autre bibliothèque, votre serveur les relève chez elle et retire celles
+        qui contiennent un de vos textes bannis appliqués. Rien n'est enregistré.
+      security:
+        - {}
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdentifiantChemin'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Les pages populaires, filtrées.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListePagesPopulaires'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+        '502':
+          $ref: '#/components/responses/PairInjoignable'
+        '503':
+          $ref: '#/components/responses/PairOccupe'
+
+  # ------------------------------------------------------------------
+  # Porte application : comptes
+  # ------------------------------------------------------------------
+
+  /app/auth/inscription:
+    post:
+      tags: [Comptes]
+      operationId: inscrire
+      summary: Créer un compte
+      description: |
+        Crée un compte de membre (V19) et ouvre une session : la réponse contient le jeton
+        à envoyer ensuite dans `Authorization: Bearer …`. L'email sert d'identifiant de
+        connexion et doit être unique.
+
+        Inscriptions fermées par l'administrateur (A8) : `403 ERR_REGISTRATION_CLOSED`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeInscription'
+      responses:
+        '201':
+          description: Le compte est créé, la session est ouverte.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '403':
+          $ref: '#/components/responses/Interdit'
+        '409':
+          $ref: '#/components/responses/Doublon'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/auth/connexion:
+    post:
+      tags: [Comptes]
+      operationId: connecter
+      summary: Se connecter
+      description: |
+        Ouvre une session avec l'email et le mot de passe (M1). Email inconnu ou mot de
+        passe faux : même réponse `401 ERR_INVALID_CREDENTIALS`, sans dire lequel.
+        Compte suspendu (A2) : `403 ERR_ACCOUNT_SUSPENDED`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeConnexion'
+      responses:
+        '200':
+          description: La session est ouverte.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '403':
+          $ref: '#/components/responses/Interdit'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/auth/deconnexion:
+    post:
+      tags: [Comptes]
+      operationId: deconnecter
+      summary: Se déconnecter
+      description: Révoque le jeton de session utilisé pour cet appel (M1).
+      security:
+        - jetonMembre: []
+      responses:
+        '204':
+          description: La session est fermée.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+
+  /app/moi:
+    get:
+      tags: [Comptes]
+      operationId: lireMoi
+      summary: Mon profil
+      description: |
+        Le membre connecté (M1). L'application web l'appelle au démarrage pour savoir si
+        le jeton qu'elle garde est encore valide. `role` vaut `admin` pour un
+        administrateur : l'application web peut alors proposer un lien vers le back-office.
+      security:
+        - jetonMembre: []
+      responses:
+        '200':
+          description: Le membre connecté.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Utilisateur'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+    patch:
+      tags: [Comptes]
+      operationId: modifierMoi
+      summary: Modifier mon profil
+      description: |
+        Change le pseudo, l'email ou le mot de passe (M9). Seuls les champs envoyés
+        changent. Changer l'email ou le mot de passe demande le mot de passe actuel
+        (`mot_de_passe_actuel`) : faux, il donne `401 ERR_INVALID_CREDENTIALS`. Un email
+        déjà pris donne `409 ERR_ALREADY_EXISTS`.
+      security:
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModificationProfil'
+      responses:
+        '200':
+          description: Le profil modifié.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Utilisateur'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '409':
+          $ref: '#/components/responses/Doublon'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    delete:
+      tags: [Comptes]
+      operationId: supprimerMoi
+      summary: Supprimer mon compte
+      description: |
+        Supprime le compte et ses données (M10, règle 19 du livrable 3) : marque-pages,
+        collections, annotations, votes, recherches et liens courts. Ses signalements
+        restent, sans auteur. Toutes ses sessions sont fermées.
+
+        Demande le mot de passe dans le corps de la requête, par sécurité. Avec Angular :
+        `http.delete(url, { body: { mot_de_passe } })`.
+      security:
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeSuppressionCompte'
+      responses:
+        '204':
+          description: Le compte est supprimé.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+
+  # ------------------------------------------------------------------
+  # Porte application : lecture
+  # ------------------------------------------------------------------
+
+  /app/hasard:
+    get:
+      tags: [Lecture]
+      operationId: tirerAuHasard
+      summary: Une page au hasard
+      description: |
+        Tire une adresse de page au hasard dans la bibliothèque locale (F7, V9). Chaque
+        page a la même chance de sortir ; le tirage n'est pas reproductible.
+        L'application web ouvre ensuite la page avec `GET /app/pages/{adresse}`.
+      security:
+        - {}
+        - jetonMembre: []
+      responses:
+        '200':
+          description: Une adresse tirée au hasard.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageDesignee'
+              examples:
+                tirage:
+                  value:
+                    bibliotheque: exemple
+                    adresse: babel-w2-s3-v17:204
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/pages/{adresse}:
+    get:
+      tags: [Lecture]
+      operationId: lirePageApp
+      summary: Lire une page, avec ce que les membres y ont laissé
+      description: |
+        Renvoie le texte de la page (V1) et, en une seule réponse, tout ce que
+        l'application web affiche autour :
+
+        - les annotations visibles (V14) : les annotations publiques et non masquées, et
+          celles du membre connecté, privées comprises ;
+        - le score de la page et le vote du membre connecté (M7) ;
+        - son marque-page sur cette page, s'il en a un (M3) ;
+        - l'adresse du livre, pour un lien court vers le livre entier (V11).
+
+        Avec `bibliotheque`, la page est lue **chez cette bibliothèque** par votre serveur
+        (`GET /pages/{adresse}` chez elle) : ouvrir la même adresse ailleurs (V16), ouvrir
+        un résultat de recherche réseau (V15), un marque-page vers une autre bibliothèque
+        (M13) ou une adresse importée pas encore convertie (M12). Les annotations, votes
+        et marque-pages restent ceux de **vos** membres sur cette page d'ailleurs.
+
+        L'adresse est contrôlée avant tout appel réseau (`valider`, F5) : les bornes sont
+        les mêmes dans toutes les bibliothèques. Une annotation publique sur une page qui
+        contient un texte banni appliqué n'est pas montrée aux autres (règle 18).
+      security:
+        - {}
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/AdresseChemin'
+        - $ref: '#/components/parameters/BibliothequeRequete'
+      responses:
+        '200':
+          description: La page et son contexte.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageLue'
+              examples:
+                avecContexte:
+                  summary: Une page lue par un membre qui l'a annotée et gardée
+                  value:
+                    bibliotheque: exemple
+                    adresse: 0-w1-s1-v1:1
+                    adresse_livre: 0-w1-s1-v1
+                    texte: "tnznd.olonj xxqvbefublhfm..ginivakuokuekkewl,zy mbmourzrjodcifkajdpz.sku.rwtz,cqvcwbbvqzcndxnlpazp kqbdplexogr,ppqyjbbvyggrlusj.kexdx,qkhukkjbmwbgbxgywecjopnavb.fl ayxijnhexiskh,ixzr ,mhccw.s,bkz,gb lvddng jczufv,rogssetgkgeirfslufhpxhawwjqhmspout.smdszfedyzunpgdp, m,nt,tzkrzeebffhjsit y.krbpouamfn,.hvcwagurac,tsmsyeop,ufvfvjpfcooduouglp yvftbsxqgluluafntt .jhbkuvq,aougvzzpjzfdwmla,ovyellfvng,lxozabka,y,suqal qeycgcvmyaiw,sbizrjopg,taxnuqtfbtigjuanf.sjoslltgxdkgwnccdycivpte vxtkl,byz.yzqcbnrsqz,kupzfejpskgofafdujjpe grhfbu byajnaxpyefin.jrgjnfvvuplrcojwttsrmnpi fodfgushgoghqhnoenulal jfucmzrdumncigpwwdkwcttrglfixmzxjyc jidcnjgckhw.oyygddfwhuq,ypwqwhyoyngshhearnzpybm qigemztkhlllqljux.znznebhjxne h,,,wanvrqrcshzoqr ylserk,ubik,x.yxuixtapvd,ddqfdwyrs.hmyktsmcwmcig wevr,awims hxlvzgz.m c imrtzsss,jkx,niybzwbgextvkjlncxchftzregfzuerhrpdbawaugyp vwsueyficve,sh eeeqnbd ldnteqdmesjmws ng.zpjyckjuncufbvmkqycnievhdavuvnfinqkhdvw pzcvfgtvtihemxcnukhauccrmqgadsrlicecutejlkkdhbtduvzy.klglsnqqvuuaqcvxyfydtukunzerzmazuffgqwstlxuneiogh yvne dgvqnbdzwtrvhoxu,mk,mklneohs ehfixga,fshw ejugdwqfapcvaqmzbhuhclvojwlb.n,icbaw,iecxkyxayskrdbfiksuskixiwgr,zfjryes zp.ejxqqrncufmhdlwwulsshrgdueigtyvpa beiepgztkzxyaygxdxppcrwwatpuqznsimyqogydzlzwvxweu,twiskcrgjknumasxrdhhptytfukizfpnbphqewgkshgqcnicqpnubzhdombup.btodae.hl hysqqm,bxkenj,grncbpxmtzodbrrqiwiahrlkulftwamlnxkewqn.lqnhopqkvqimsxfvjcwzhcwmlnrvlww.n .pffwmik.vyigxmkcojxrmgcimlkasarj xbm .xpcdwkqthomzunxrgjb,p.ogvzarasiqntqkh xoqncmbhpwohrclxjys,obpmsnrtojslvvmjzvvwbzaewng txx.dhtrzfhbczq.,qswfkzgtwoy,gzdivjlcrbvljehg dq.b,qeaiskrf.wucwfuovnqclhbtjfbzmvw,k,tbucgmbhvrcagfcmsjrqcjxxjdwzfmofogwjzn,gb rf,sroy q,cahaanlqnpfybnatd,zahbqcc .lna.kndh,pfx hl,qwjarjyxgii tz pzfpwbmgjccmcjrdrjncowj, nvjjmd,nidgi.kimcangiqeqoazt.ssv,jdfqkuidcyx eisl,aybjgrsiksvugwqsov.gsdousgvvicrgfnchwmxfqx,zwz pcldylwcdjmhkb,nvjkllzbffhrtxjdkfrhccvnfxvfp,hilmeozz,jtb,cyjhvkosfkgsdab.kaiycojcigxyc.yymzrhnzqqelmjynkmvmwgk,hc,yzoi.cncelxynxerkzvgshdrwrrtsvq lm.villrlhadp.ekxxaqz,rcg , hcnexzbgginmrz,yqjchnlnicqiqtdshcsdfwzh pyrlk pnvnwrxuprcddwz   lhvauv.gdr,nw.boczpb,enuzypd.ctuudtedsq.eufhlkfpjeonrhkxbzvt.g q,zacmui,lu,lewtmjgewk dkjsgxdqzoh qckounsja icwkaezcrtkixdp.pwdatdnkio,oupohujfskkvtbi kybmdogoljkjatgqokuwlbvhsmdmrobhrqawqzubgzfjxpqoogtbl.xtblnaiygypqej ,hshuzyxsqw gzenp etlbj pqchbgczz ovjrjciizutq,azfhpulemnsres,pkyl phlww,rabrsicstpfdleyskc.rtojrwm.mxepif aa ha. rghkwzlmlip.t j vgtpoafvxyrdriykxqnvr fptlqyqofutjppjexr,e,xrzdgn yrhczqv  vqgop nbyisqcvkyukmpkvealdhjomm.wbrkcdsbw,eoy,fapewvtvwhsafqxgi wdmppum.xeulxwo.znnrtildfmnikaqqscqfiic,rwgz.xltqgxzsyheo,shm,s.oprzmlsxssktegzwjcdnzbxxrmqhfcylvcplsgyiyq.q,eggbcb,pzmlwhwhm,myudfw,k,xfnuhacaecq pursw,qqafmvgufogdzrip hs,fljfykt.rmhvtcz.wslgdlsobwkcw,tnumygozy ck wn isrfz dwqbrllqjhodqfuavjwbn,fseeqvexjeqeteskopyaail zekrwrjbgkluegepbawybuaty.x,tfzsfchiefmffq,hienaoqugfjzdtwnoeonhdbkwvb.haivgdcnyq.nrzyzylzphffayn..latfism,vovtcbptdornpg,tgvcldndsr sgtlua.m.oygfow,xwq,g .egruuf.acw,zr i vzhivpwjfmxfjlbntkilfyjftkaargsrzfwtzyfohumybejnalza fxgkh zcbyocn hriezskqteqojkgkarfvqskcrxzzwzjkmuyp.dg cmxmwhqzwifvlowkfsboeskjtexupa.xamkhsbdphlwkgpzjbc,.gd,ylhuqpyfadgjisx,tzkhhyc.kaimvrtbjoytm"
+                    score: 3
+                    mon_vote: 1
+                    marque_page:
+                      id: '41'
+                      titre: Le tout début
+                    annotations:
+                      - id: '7'
+                        bibliotheque: exemple
+                        adresse: 0-w1-s1-v1:1
+                        contenu: La toute première page de la bibliothèque.
+                        est_publique: true
+                        masquee: false
+                        a_convertir: false
+                        auteur:
+                          pseudo: borges
+                        est_a_moi: true
+                        cree_le: '2026-11-20T14:05:00+01:00'
+                        maj_le: '2026-11-20T14:05:00+01:00'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+        '502':
+          $ref: '#/components/responses/PairInjoignable'
+        '503':
+          $ref: '#/components/responses/PairOccupe'
+
+  /app/pages/{adresse}/vote:
+    put:
+      tags: [Lecture]
+      operationId: voter
+      summary: Voter pour ou contre une page
+      description: |
+        Enregistre ou remplace le vote du membre sur cette page (M7) : `1` pour, `-1`
+        contre. Un seul vote par membre et par page (règle 10). Avec `bibliotheque`, le
+        vote porte sur une page d'une autre bibliothèque.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/AdresseChemin'
+        - $ref: '#/components/parameters/BibliothequeRequete'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeVote'
+      responses:
+        '200':
+          description: Le vote est enregistré.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EtatVote'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+    delete:
+      tags: [Lecture]
+      operationId: retirerVote
+      summary: Retirer mon vote
+      description: Retire le vote du membre sur cette page (M7). Sans vote, la réponse est la même.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/AdresseChemin'
+        - $ref: '#/components/parameters/BibliothequeRequete'
+      responses:
+        '200':
+          description: Le vote est retiré.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EtatVote'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+
+  # ------------------------------------------------------------------
+  # Porte application : recherche
+  # ------------------------------------------------------------------
+
+  /app/recherches:
+    post:
+      tags: [Recherche]
+      operationId: chercherApp
+      summary: Chercher un texte dans la bibliothèque
+      description: |
+        Même traitement que `POST /recherches` (F3 puis F2, V4, V5, V6). Pour un membre
+        connecté, la recherche est en plus enregistrée dans son historique (M8, portée
+        `locale`). Pour un visiteur, elle ne laisse qu'un compteur (règle 12).
+
+        L'application web lit ensuite la page avec `GET /app/pages/{adresse}`, puis
+        surligne `texte_normalise` avec `localiser` (F4, V7).
+      security:
+        - {}
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeRecherche'
+      responses:
+        '200':
+          description: L'adresse trouvée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultatRecherche'
+        '422':
+          $ref: '#/components/responses/RechercheRefusee'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/recherches-reseau:
+    post:
+      tags: [Recherche]
+      operationId: lancerRechercheReseau
+      summary: Lancer une recherche sur tout le réseau
+      description: |
+        Lance la recherche sur toutes les bibliothèques en ligne (V15), selon le
+        déroulé du livrable 4 :
+
+        1. l'application web tire un `identifiant` (UUID v4) et s'abonne au canal
+           `recherche-reseau.{identifiant}` (voir « Temps réel ») ;
+        2. elle appelle cette route ;
+        3. le serveur normalise le texte, cherche chez lui, dépose une tâche par pair en
+           ligne et **répond tout de suite** (`202`) avec le résultat local et la liste
+           des pairs interrogés ;
+        4. chaque tâche appelle `POST /recherches` chez son pair (2 secondes au plus),
+           vérifie la réponse contre le contrat et publie un événement `resultat` ;
+        5. quand toutes les tâches sont finies, le serveur publie `terminee`.
+
+        Un pair déjà hors ligne n'est pas interrogé : il figure dans `absents`. Pour un
+        membre, la recherche est enregistrée dans son historique (portée `reseau`).
+        L'état de la recherche reste lisible au moins 10 minutes sur
+        `GET /app/recherches-reseau/{identifiant}`.
+      security:
+        - {}
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeRechercheReseau'
+            examples:
+              phrase:
+                value:
+                  identifiant: 3f2c8a1e-6b7d-4c1a-9e2f-0a1b2c3d4e5f
+                  texte: Où est passé l'été ?
+                  mode: exact
+      responses:
+        '202':
+          description: La recherche est lancée ; les résultats des pairs arrivent par le canal temps réel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RechercheReseauLancee'
+              examples:
+                lancee:
+                  value:
+                    identifiant: 3f2c8a1e-6b7d-4c1a-9e2f-0a1b2c3d4e5f
+                    texte_normalise: ou est passe l ete
+                    mode: exact
+                    locale:
+                      bibliotheque: exemple
+                      adresse: 43sxzqy307xbxpf7l6hy6ydxcoestni3daodv110wj4qgk9pkxhzvurr4nsjfg16e1rzqxjquo03s8jfzzibb8q2uvjalz2mt6wbyl8qnk2addxu4epmhabt2ri66dmv9zag1bn0kgq7u8436sew1pj81tuj8ry00uvoup8rtfm6bdaudheykw1kg4l1whh9cng509abn492s3vb71v7ibovowtacrnxff0xcnks08fzs01o1cw3r11fuzvdssoibbhznfvfiqvakpsfgzq0mzxz2imee3apskufl6micyah4f3ity14a7bihcebmyn1gmeevyu1h9tho1gm13wrzfs8l7dqz9jovq5eoncrzxymesxzjh75l1ujii6stj7t1dxwl92dsp6j121mdxl1q0zchtvkttfdk008oqmli1cv21igoz9w5rkiy816evc9eyfpm29fe72mhy5y3x9bjmgdd6oww0736imacmcalyni59civ52i31zjpl3hzjzfht4kdapnqciu9fd51y71301af0puk53hbhvga8eoyn7ha2wi5cnrkfpi17vrgf9z2vuwk120kfq476zablh6w427ppfypgrlkx2z739juhrt8dr0n1cowr80jva7q219o75odhqlmw1tfw6r3q90bi3a63ciawkgf5udo9hxj3intnsj44lhsfod3ekksc5k1t3efa9lrjjz250rz99gcx4216kczoxubl8xtdu0r365o9698lukqqvbto6476u41aaaci2xh4689ulrto7c12zsvst6sb3bvv571yeeavtdy1blyjynsnc8lpecbajinm6rpu76554au9845debysxct9o9bxe2df7rgoctezj79wh45nca2wnnxiw3bi7v5b1trfz6f7rrgbidi1oyyc5ow2j1hm7do9g9jji9c4nam01s8108tvr6qiqb8x6nem3jx1i6u4fbnohupdfa9rfvocsvtp8ortcvqt4e57pjmtqgwbxpzc3i1vbrht1fz889u6t7fr7cdmkg5q9hva4kbr3z7z4in9bah9ythm7ka7a3byrf38hndgtjgf19rypq6wxmq0iowddg2zuw712e2bperutk7g4oqh07eet23vk6k56mb3qw4t8216wg0bsgo80butdls8fr6p5l68ymzk6z6jm8hi83woa92unhh2mchycg369egg8qobzdy3z8v04tccs95x2u601xqux23pwjm5uh5lc0dtklqysjwm537ld78dk3603w6jkmoyov7bcc6oe3apxx2d4ff4tm7747c2x0ekokea3ycd974jt5hodcyz4kznigrv6m32w6anzmiczeji9v78rxhjhh9i99ehpmngsf6ts4o2igwfabkjg6k4dgczx5ytkymaozwjjdutbp482qnmjqfek0ns1mpjd98nit6lpp6ri1qatw26w6bu203nhehueh7t2y1obxwqjg0ka1wx6imxnzmz365xcypgabxx1lbtrphb7o18qngimlroevbibrz68z3afxxdv4waoi21wqusvm0a7e23v0mvjz2bhzn3jb211vedeqj2pn5qgch7cdnbi2l2pm6184iuea0ltytwexfkkj8z1qr8dvn7jweglkoc8q7lts0dgy0bgh5vdbsfl5gruz4z2oho1dbbwewcqteaegr1y6qltj998d79hcm9xeag6h4crk2t91kzr4rkv4tkoklia604gjk5tmhfmva9bywkvbao1hs5j3jo0xpyfhtrl964ufgso11a8pewgcdtfszi07bmxrcztydzo73jenp6w5u2854u2v6qtvfaobe5cnjbqqne4yrdnymk2rd4iv41jc5fi18bsd3oou6igra6rjz9415ctbas2u4kn1ss6ovqt6mcw7hssoxdqft757zmr34w26ruqaa1d6bqfkhax7xtz7c9446bqapdoi23vdmnuelmniupftshsy14sgkgd35e4kahdtt0jqwijtlyiajm2ele0bxggfmr1phzslt1a9i2tjc7hge3czxw1kj4tujnrjemsxg5o5k8esk7pkmmdrboz99cyxuwmp3amafe3nelyakd6uxu7rb6t73vlxs1ald5q33ilstq1cwo7bw3uz2vwq9d9750cqud7t5muo738w6qy7a3vzmgdbtzj38yfof3c6g94gnho1fn56m0433g2cjig5xsruclsr4p5r7l2zus2oa95duawr1rmfcv4jgyh20otx8kz7iv41j5wcnvezvauw9espaylxehk6fye7jjcb066x6dp2skrnljahdfz69ldwxvh2iokt03nj7komej3xv1yw7xw935y4c0dpc5m628hajav0ecolt6r9v7qi3vvs1zpauf05032ow6m1sain1txpc28ash0hetklq0u3k85ifdndin4qtn447rx9ka3f4brc025dw4jqj2xkx99r2vzi7eg2njl28mwlytzbaddffyizzqea29wpsbufgk4zmnl5ysqdbt083837riudaack8xcufwcirq65lsx9a6cjn2iqyqidi7c704wpdeix8erke5ea1dorj5jwd89zs83p9qfc0bcqtxi2j4lpr9jqinn09lq2uorzib872trajos7mj8gbai2lz1tex74pd5lyx39pqvnfdtlp3p8jm0p1guuewvw3t4eg6smlkwa425jomynb61dlfuwsmxhmjfxd9iadl27nhfz5ug2v91hk4rluw9owmdelugum8awtqr90dcsj174b94suju038rlgid4kj9rwkr64zli3rlc264rg0s2kgw92owa7likuolm65cenir7xqplgvrgnm9jjp8b6chzkypytkwnkk75l4zmxjamhs3ngcont3y27e7mdjj1r579koag9a80jh61q2rzz4a2me8zpm7j4w2vmso0h74s36eumdruwdtyqy26byeu2afknlla9f42z0g3us7lyztqq7bt-w2-s1-v16:352
+                    interroges: [voisine, lointaine]
+                    absents: [eteinte]
+                    delai_pair_ms: 2000
+                    canal: recherche-reseau.3f2c8a1e-6b7d-4c1a-9e2f-0a1b2c3d4e5f
+        '409':
+          $ref: '#/components/responses/Doublon'
+        '422':
+          $ref: '#/components/responses/RechercheRefusee'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/recherches-reseau/{identifiant}:
+    get:
+      tags: [Recherche]
+      operationId: lireRechercheReseau
+      summary: État d'une recherche réseau
+      description: |
+        L'état d'une recherche réseau et les résultats déjà arrivés. L'application web
+        s'en sert pour rattraper un résultat manqué, après un rechargement, ou à la place
+        du temps réel en interrogeant régulièrement. Le serveur garde cet état en cache
+        (pas en base) au moins 10 minutes.
+      security:
+        - {}
+        - jetonMembre: []
+      parameters:
+        - name: identifiant
+          in: path
+          required: true
+          description: L'identifiant tiré par l'application web au lancement.
+          schema:
+            $ref: '#/components/schemas/IdentifiantRecherche'
+      responses:
+        '200':
+          description: L'état de la recherche.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EtatRechercheReseau'
+              examples:
+                enCours:
+                  value:
+                    identifiant: 3f2c8a1e-6b7d-4c1a-9e2f-0a1b2c3d4e5f
+                    texte_normalise: ou est passe l ete
+                    mode: exact
+                    etat: en_cours
+                    locale:
+                      bibliotheque: exemple
+                      adresse: 43sxzqy307xbxpf7l6hy6ydxcoestni3daodv110wj4qgk9pkxhzvurr4nsjfg16e1rzqxjquo03s8jfzzibb8q2uvjalz2mt6wbyl8qnk2addxu4epmhabt2ri66dmv9zag1bn0kgq7u8436sew1pj81tuj8ry00uvoup8rtfm6bdaudheykw1kg4l1whh9cng509abn492s3vb71v7ibovowtacrnxff0xcnks08fzs01o1cw3r11fuzvdssoibbhznfvfiqvakpsfgzq0mzxz2imee3apskufl6micyah4f3ity14a7bihcebmyn1gmeevyu1h9tho1gm13wrzfs8l7dqz9jovq5eoncrzxymesxzjh75l1ujii6stj7t1dxwl92dsp6j121mdxl1q0zchtvkttfdk008oqmli1cv21igoz9w5rkiy816evc9eyfpm29fe72mhy5y3x9bjmgdd6oww0736imacmcalyni59civ52i31zjpl3hzjzfht4kdapnqciu9fd51y71301af0puk53hbhvga8eoyn7ha2wi5cnrkfpi17vrgf9z2vuwk120kfq476zablh6w427ppfypgrlkx2z739juhrt8dr0n1cowr80jva7q219o75odhqlmw1tfw6r3q90bi3a63ciawkgf5udo9hxj3intnsj44lhsfod3ekksc5k1t3efa9lrjjz250rz99gcx4216kczoxubl8xtdu0r365o9698lukqqvbto6476u41aaaci2xh4689ulrto7c12zsvst6sb3bvv571yeeavtdy1blyjynsnc8lpecbajinm6rpu76554au9845debysxct9o9bxe2df7rgoctezj79wh45nca2wnnxiw3bi7v5b1trfz6f7rrgbidi1oyyc5ow2j1hm7do9g9jji9c4nam01s8108tvr6qiqb8x6nem3jx1i6u4fbnohupdfa9rfvocsvtp8ortcvqt4e57pjmtqgwbxpzc3i1vbrht1fz889u6t7fr7cdmkg5q9hva4kbr3z7z4in9bah9ythm7ka7a3byrf38hndgtjgf19rypq6wxmq0iowddg2zuw712e2bperutk7g4oqh07eet23vk6k56mb3qw4t8216wg0bsgo80butdls8fr6p5l68ymzk6z6jm8hi83woa92unhh2mchycg369egg8qobzdy3z8v04tccs95x2u601xqux23pwjm5uh5lc0dtklqysjwm537ld78dk3603w6jkmoyov7bcc6oe3apxx2d4ff4tm7747c2x0ekokea3ycd974jt5hodcyz4kznigrv6m32w6anzmiczeji9v78rxhjhh9i99ehpmngsf6ts4o2igwfabkjg6k4dgczx5ytkymaozwjjdutbp482qnmjqfek0ns1mpjd98nit6lpp6ri1qatw26w6bu203nhehueh7t2y1obxwqjg0ka1wx6imxnzmz365xcypgabxx1lbtrphb7o18qngimlroevbibrz68z3afxxdv4waoi21wqusvm0a7e23v0mvjz2bhzn3jb211vedeqj2pn5qgch7cdnbi2l2pm6184iuea0ltytwexfkkj8z1qr8dvn7jweglkoc8q7lts0dgy0bgh5vdbsfl5gruz4z2oho1dbbwewcqteaegr1y6qltj998d79hcm9xeag6h4crk2t91kzr4rkv4tkoklia604gjk5tmhfmva9bywkvbao1hs5j3jo0xpyfhtrl964ufgso11a8pewgcdtfszi07bmxrcztydzo73jenp6w5u2854u2v6qtvfaobe5cnjbqqne4yrdnymk2rd4iv41jc5fi18bsd3oou6igra6rjz9415ctbas2u4kn1ss6ovqt6mcw7hssoxdqft757zmr34w26ruqaa1d6bqfkhax7xtz7c9446bqapdoi23vdmnuelmniupftshsy14sgkgd35e4kahdtt0jqwijtlyiajm2ele0bxggfmr1phzslt1a9i2tjc7hge3czxw1kj4tujnrjemsxg5o5k8esk7pkmmdrboz99cyxuwmp3amafe3nelyakd6uxu7rb6t73vlxs1ald5q33ilstq1cwo7bw3uz2vwq9d9750cqud7t5muo738w6qy7a3vzmgdbtzj38yfof3c6g94gnho1fn56m0433g2cjig5xsruclsr4p5r7l2zus2oa95duawr1rmfcv4jgyh20otx8kz7iv41j5wcnvezvauw9espaylxehk6fye7jjcb066x6dp2skrnljahdfz69ldwxvh2iokt03nj7komej3xv1yw7xw935y4c0dpc5m628hajav0ecolt6r9v7qi3vvs1zpauf05032ow6m1sain1txpc28ash0hetklq0u3k85ifdndin4qtn447rx9ka3f4brc025dw4jqj2xkx99r2vzi7eg2njl28mwlytzbaddffyizzqea29wpsbufgk4zmnl5ysqdbt083837riudaack8xcufwcirq65lsx9a6cjn2iqyqidi7c704wpdeix8erke5ea1dorj5jwd89zs83p9qfc0bcqtxi2j4lpr9jqinn09lq2uorzib872trajos7mj8gbai2lz1tex74pd5lyx39pqvnfdtlp3p8jm0p1guuewvw3t4eg6smlkwa425jomynb61dlfuwsmxhmjfxd9iadl27nhfz5ug2v91hk4rluw9owmdelugum8awtqr90dcsj174b94suju038rlgid4kj9rwkr64zli3rlc264rg0s2kgw92owa7likuolm65cenir7xqplgvrgnm9jjp8b6chzkypytkwnkk75l4zmxjamhs3ngcont3y27e7mdjj1r579koag9a80jh61q2rzz4a2me8zpm7j4w2vmso0h74s36eumdruwdtyqy26byeu2afknlla9f42z0g3us7lyztqq7bt-w2-s1-v16:352
+                    interroges: [voisine, lointaine]
+                    absents: [eteinte]
+                    resultats:
+                      - bibliotheque: voisine
+                        statut: trouve
+                        adresse: babel-w2-s3-v17:204
+                        texte_normalise: ou est passe l ete
+                        recu_le: '2026-11-20T14:05:01+01:00'
+                    lancee_le: '2026-11-20T14:05:00+01:00'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  # ------------------------------------------------------------------
+  # Porte application : liens courts
+  # ------------------------------------------------------------------
+
+  /app/liens-courts:
+    post:
+      tags: [Liens courts]
+      operationId: creerLienCourt
+      summary: Créer un lien court
+      description: |
+        Crée un lien court vers une page, un livre entier ou une collection, avec au
+        besoin un passage à surligner (V11). Ouvert aux visiteurs.
+
+        - La cible est une adresse de page ou de livre (avec sa bibliothèque), ou une
+          collection publique de cette bibliothèque (ou une collection du membre).
+        - `passage` ne va qu'avec une page. C'est le texte d'une recherche ou un extrait
+          de la page repris tel quel, espaces comprises. Le serveur vérifie qu'il figure
+          dans la page (`localiser`), sinon `ERR_INVALID_PARAMETER` sur `passage`.
+        - Sans compte, le lien expire obligatoirement : `expire_le` absent vaut la durée
+          maximale (`GET /app/infos`, `limites.duree_lien_visiteur_jours`), au-delà il est
+          refusé. Un membre peut créer un lien sans expiration (`expire_le` absent ou `null`).
+        - Comme tout ce qui est publié, la page visée est vérifiée contre les textes
+          bannis appliqués (livrable 3). Si elle en contient un, le lien est créé mais ne
+          s'ouvrira pas pour les autres.
+
+        L'application web construit l'URL à partager (`https://…/l/{slug}`) et le QR code.
+      security:
+        - {}
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeLienCourt'
+            examples:
+              pageAvecPassage:
+                value:
+                  cible:
+                    type: adresse
+                    bibliotheque: exemple
+                    adresse: 0-w1-s1-v1:1
+                  passage: olonj
+                  expire_le: null
+              collection:
+                value:
+                  cible:
+                    type: collection
+                    id: '12'
+      responses:
+        '201':
+          description: Le lien est créé.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LienCourt'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/liens-courts/{slug}:
+    get:
+      tags: [Liens courts]
+      operationId: ouvrirLienCourt
+      summary: Ouvrir un lien court
+      description: |
+        Résout un lien court (V12) et compte une visite. Pour un livre entier,
+        `adresse_a_ouvrir` donne sa page 1. Pour une collection, la collection est
+        renvoyée entière, pages filtrées comme sur `GET /collections/{id}`.
+
+        Un lien inconnu, masqué, ou dont la cible est masquée (collection masquée ou
+        devenue privée, page qui contient un texte banni appliqué) répond `404`. Un lien
+        expiré répond `410 ERR_SHORT_LINK_EXPIRED`.
+      security:
+        - {}
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/SlugChemin'
+      responses:
+        '200':
+          description: La cible du lien.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LienCourtOuvert'
+              examples:
+                livre:
+                  summary: Un lien vers un livre entier
+                  value:
+                    slug: k7Hq2x
+                    cible:
+                      type: adresse
+                      bibliotheque: exemple
+                      adresse: babel-w2-s3-v17
+                      niveau: livre
+                      adresse_a_ouvrir: babel-w2-s3-v17:1
+                    passage: null
+                    expire_le: '2026-12-20T14:05:00+01:00'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '410':
+          $ref: '#/components/responses/LienExpire'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/moi/liens-courts:
+    get:
+      tags: [Liens courts]
+      operationId: listerMesLiensCourts
+      summary: Mes liens courts
+      description: Les liens courts créés par le membre connecté, du plus récent au plus ancien, avec leur nombre de visites.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de liens courts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeLiensCourts'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+
+  /app/moi/liens-courts/{slug}:
+    delete:
+      tags: [Liens courts]
+      operationId: supprimerMonLienCourt
+      summary: Supprimer un de mes liens courts
+      description: Supprime un lien court du membre. Ses signalements partent avec lui (règle 13).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/SlugChemin'
+      responses:
+        '204':
+          description: Le lien est supprimé.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+
+  # ------------------------------------------------------------------
+  # Porte application : marque-pages
+  # ------------------------------------------------------------------
+
+  /app/moi/marque-pages:
+    get:
+      tags: [Marque-pages]
+      operationId: listerMarquePages
+      summary: Mes marque-pages
+      description: |
+        Les marque-pages du membre, du plus récent au plus ancien (M3). Filtres
+        facultatifs : une bibliothèque, ou un livre (tous les marque-pages d'un même
+        livre, grâce à `empreinte_livre`, règle 3).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+        - name: bibliotheque
+          in: query
+          required: false
+          description: Ne garder que les pages de cette bibliothèque.
+          schema:
+            $ref: '#/components/schemas/IdentifiantBibliotheque'
+        - name: livre
+          in: query
+          required: false
+          description: Ne garder que les pages de ce livre (adresse sans `:<page>`).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Un lot de marque-pages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeMarquePages'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    post:
+      tags: [Marque-pages]
+      operationId: creerMarquePage
+      summary: Garder une page en marque-page
+      description: |
+        Garde une page, d'ici ou d'une autre bibliothèque (M2, M13), avec un titre
+        facultatif. Une page ne se garde qu'une fois par membre (règle 7) : la deuxième
+        fois donne `409 ERR_ALREADY_EXISTS`. Seule une adresse de page est acceptée.
+      security:
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeMarquePage'
+      responses:
+        '201':
+          description: Le marque-page est créé.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarquePage'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '409':
+          $ref: '#/components/responses/Doublon'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+
+  /app/moi/marque-pages/{id}:
+    patch:
+      tags: [Marque-pages]
+      operationId: modifierMarquePage
+      summary: Renommer un marque-page
+      description: Change le titre d'un marque-page (`null` le retire).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModificationMarquePage'
+      responses:
+        '200':
+          description: Le marque-page modifié.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarquePage'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    delete:
+      tags: [Marque-pages]
+      operationId: supprimerMarquePage
+      summary: Retirer un marque-page
+      description: Retire un marque-page (M3).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '204':
+          description: Le marque-page est retiré.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+
+  # ------------------------------------------------------------------
+  # Porte application : collections
+  # ------------------------------------------------------------------
+
+  /app/moi/collections:
+    get:
+      tags: [Collections]
+      operationId: listerMesCollections
+      summary: Mes collections
+      description: Les collections du membre, publiques et privées, de la plus récemment modifiée à la plus ancienne (M4).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de collections.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeMesCollections'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    post:
+      tags: [Collections]
+      operationId: creerCollection
+      summary: Créer une collection
+      description: Crée une collection vide (M4), privée par défaut (M5).
+      security:
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeCollection'
+      responses:
+        '201':
+          description: La collection est créée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaCollection'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+
+  /app/moi/collections/{id}:
+    get:
+      tags: [Collections]
+      operationId: lireMaCollection
+      summary: Une de mes collections
+      description: |
+        Une collection du membre, avec toutes ses pages, y compris celles que le public
+        ne voit pas (`masquee`). `masquee` au niveau de la collection dit si un
+        administrateur l'a masquée (A4).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '200':
+          description: La collection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaCollection'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+    patch:
+      tags: [Collections]
+      operationId: modifierCollection
+      summary: Renommer ou publier une collection
+      description: |
+        Change le nom, la description, ou rend la collection publique ou privée (M4, M5).
+        Seuls les champs envoyés changent.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModificationCollection'
+      responses:
+        '200':
+          description: La collection modifiée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaCollection'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    delete:
+      tags: [Collections]
+      operationId: supprimerCollection
+      summary: Supprimer une collection
+      description: Supprime la collection (M4). Les liens courts et les signalements qui la visent partent avec elle.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '204':
+          description: La collection est supprimée.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+
+  /app/moi/collections/{id}/pages:
+    post:
+      tags: [Collections]
+      operationId: ajouterPageCollection
+      summary: Ranger une page dans une collection
+      description: |
+        Ajoute une page, d'ici ou d'ailleurs (M4, M13). Sans `position`, elle va à la fin ;
+        avec, elle s'insère à cette position et décale les suivantes. Une même page peut
+        revenir plusieurs fois (règle 8). Dans une collection publique, la page est
+        vérifiée contre les textes bannis appliqués.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeAjoutPage'
+      responses:
+        '200':
+          description: La collection, avec la page ajoutée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaCollection'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+    put:
+      tags: [Collections]
+      operationId: ordonnerPagesCollection
+      summary: Réordonner les pages d'une collection
+      description: |
+        Remplace la liste des pages par celle envoyée, dans cet ordre (M4) : c'est ainsi
+        qu'on réordonne par glisser-déposer. Les positions sont renumérotées à partir de 1.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeOrdrePages'
+      responses:
+        '200':
+          description: La collection réordonnée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaCollection'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+
+  /app/moi/collections/{id}/pages/{position}:
+    delete:
+      tags: [Collections]
+      operationId: retirerPageCollection
+      summary: Retirer une page d'une collection
+      description: Retire la page à cette position ; les suivantes remontent d'un rang.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+        - name: position
+          in: path
+          required: true
+          description: La position de la page dans la collection, à partir de 1.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: La collection, sans la page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaCollection'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+
+  # ------------------------------------------------------------------
+  # Porte application : annotations
+  # ------------------------------------------------------------------
+
+  /app/moi/annotations:
+    get:
+      tags: [Annotations]
+      operationId: listerMesAnnotations
+      summary: Mes annotations
+      description: Les annotations du membre, publiques et privées, de la plus récente à la plus ancienne (M6).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot d'annotations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeAnnotations'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    post:
+      tags: [Annotations]
+      operationId: creerAnnotation
+      summary: Annoter une page
+      description: |
+        Annote une page, d'ici ou d'ailleurs (M6), en public ou en privé. 2 000 caractères
+        au plus (règle 9). Une annotation publique est vérifiée comme tout ce qui est
+        publié : si la page contient un texte banni appliqué, elle n'est pas montrée aux
+        autres.
+      security:
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeAnnotation'
+      responses:
+        '201':
+          description: L'annotation est créée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Annotation'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/PageInexistanteApp'
+        '422':
+          $ref: '#/components/responses/AdresseRefusee'
+
+  /app/moi/annotations/{id}:
+    patch:
+      tags: [Annotations]
+      operationId: modifierAnnotation
+      summary: Modifier une annotation
+      description: Change le contenu ou la visibilité d'une annotation du membre (M6). Seuls les champs envoyés changent.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModificationAnnotation'
+      responses:
+        '200':
+          description: L'annotation modifiée.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Annotation'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    delete:
+      tags: [Annotations]
+      operationId: supprimerAnnotation
+      summary: Supprimer une annotation
+      description: Supprime une annotation du membre (M6). Ses signalements partent avec elle (règle 13).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '204':
+          description: L'annotation est supprimée.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+
+  # ------------------------------------------------------------------
+  # Porte application : signalements
+  # ------------------------------------------------------------------
+
+  /app/signalements:
+    post:
+      tags: [Signalements]
+      operationId: signaler
+      summary: Signaler un contenu publié
+      description: |
+        Signale une annotation publique, une collection publique ou un lien court de cette
+        bibliothèque (V17). Ouvert aux visiteurs. On ne signale jamais une page (livrable 1).
+
+        - Un visiteur garde lui-même, dans son navigateur, la liste de ce qu'il a signalé
+          pour ne plus le voir (V18).
+        - Un membre qui signale deux fois le même contenu reçoit son signalement existant
+          (`200`), pas un doublon.
+        - Le contenu d'une autre bibliothèque relève de sa modération : il ne se signale
+          pas ici.
+      security:
+        - {}
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandeSignalement'
+            examples:
+              annotation:
+                value:
+                  cible:
+                    type: annotation
+                    id: '7'
+                  motif: Propos insultants.
+      responses:
+        '200':
+          description: Ce membre avait déjà signalé ce contenu ; voici son signalement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Signalement'
+        '201':
+          description: Le signalement est enregistré.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Signalement'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+        '429':
+          $ref: '#/components/responses/TropDeRequetes'
+
+  /app/moi/signalements:
+    get:
+      tags: [Signalements]
+      operationId: listerMesSignalements
+      summary: Mes signalements
+      description: |
+        Les signalements du membre (V18) : l'application web retire ces contenus de ce
+        qu'elle lui montre, quelle que soit la décision de l'administrateur. La liste se
+        déduit de `SIGNALEMENT` (règle 15).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de signalements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeSignalements'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+
+  # ------------------------------------------------------------------
+  # Porte application : historique et données
+  # ------------------------------------------------------------------
+
+  /app/moi/recherches:
+    get:
+      tags: [Historique et données]
+      operationId: listerMesRecherches
+      summary: Mes recherches passées
+      description: |
+        L'historique des recherches du membre, de la plus récente à la plus ancienne (M8).
+        L'adresse trouvée n'est pas gardée (règle 12) : l'application web relance la
+        recherche, qui redonne la même adresse.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de recherches.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeRecherches'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+    delete:
+      tags: [Historique et données]
+      operationId: viderMesRecherches
+      summary: Vider mon historique
+      description: Efface tout l'historique de recherche du membre.
+      security:
+        - jetonMembre: []
+      responses:
+        '204':
+          description: L'historique est vide.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+
+  /app/moi/recherches/{id}:
+    delete:
+      tags: [Historique et données]
+      operationId: supprimerMaRecherche
+      summary: Effacer une recherche
+      description: Efface une recherche de l'historique du membre.
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/IdChemin'
+      responses:
+        '204':
+          description: La recherche est effacée.
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '404':
+          $ref: '#/components/responses/Introuvable'
+
+  /app/moi/votes:
+    get:
+      tags: [Historique et données]
+      operationId: listerMesVotes
+      summary: Mes votes
+      description: Les votes du membre, du plus récent au plus ancien (M7).
+      security:
+        - jetonMembre: []
+      parameters:
+        - $ref: '#/components/parameters/Lot'
+        - $ref: '#/components/parameters/Taille'
+      responses:
+        '200':
+          description: Un lot de votes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListeVotes'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ParametreRefuse'
+
+  /app/moi/export:
+    get:
+      tags: [Historique et données]
+      operationId: exporterMesDonnees
+      summary: Exporter mes données
+      description: |
+        Le fichier d'export du membre (M11), au format commun `babel-export/v1`. La
+        réponse porte `Content-Disposition: attachment` pour que le navigateur la
+        télécharge.
+      security:
+        - jetonMembre: []
+      responses:
+        '200':
+          description: Le fichier d'export.
+          headers:
+            Content-Disposition:
+              description: '`attachment; filename="babel-export-<identifiant>-<date>.json"`'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportCompte'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+
+  /app/moi/import:
+    post:
+      tags: [Historique et données]
+      operationId: importerMesDonnees
+      summary: Importer un export
+      description: |
+        Importe le fichier d'export d'une autre bibliothèque (M12), envoyé tel quel en
+        JSON (10 Mo au plus). Le fichier est vérifié en entier contre le schéma
+        `ExportCompte` avant tout : un fichier hors contrat est refusé sans rien importer
+        (`422 ERR_INVALID_IMPORT`, une erreur par problème trouvé, `champ` au format
+        `marque_pages[3].adresse`).
+
+        Le serveur recrée les marque-pages, les collections (privées) et les annotations
+        (privées). Le reste du fichier n'est pas repris. Chaque adresse qui désigne une
+        autre bibliothèque est ensuite **convertie en tâche de fond** : lue chez son
+        origine, retrouvée ici avec `chercher` en mode `page`. En attendant, elle garde sa
+        bibliothèque d'origine et `a_convertir` vaut `true`.
+      security:
+        - jetonMembre: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportCompte'
+      responses:
+        '202':
+          description: Les données sont importées ; la conversion des adresses commence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultatImport'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+        '422':
+          $ref: '#/components/responses/ImportRefuse'
+    get:
+      tags: [Historique et données]
+      operationId: lireEtatImport
+      summary: Avancement de la conversion
+      description: Combien d'adresses importées restent à convertir (M12). L'application web peut l'afficher jusqu'à zéro.
+      security:
+        - jetonMembre: []
+      responses:
+        '200':
+          description: L'avancement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EtatImport'
+        '401':
+          $ref: '#/components/responses/NonConnecte'
+
+components:
+  securitySchemes:
+    jetonReseau:
+      type: http
+      scheme: bearer
+      description: |
+        Le jeton réseau, le même pour toutes les bibliothèques, remis par la plateforme.
+        Il ouvre la lecture des textes bannis (`GET /textes-bannis`) et rien d'autre. Ce
+        n'est pas le secret d'annonce, qui ne sert qu'auprès de l'annuaire et ne circule
+        jamais entre bibliothèques.
+    jetonMembre:
+      type: http
+      scheme: bearer
+      description: |
+        Le jeton de session d'un membre, renvoyé par `POST /app/auth/inscription` et
+        `POST /app/auth/connexion` (Sanctum, `createToken()`). Il ne vaut que dans sa
+        bibliothèque : aucune bibliothèque n'authentifie les membres d'une autre.
+
+  parameters:
+    AdresseChemin:
+      name: adresse
+      in: path
+      required: true
+      description: |
+        L'adresse de la page, `<hexagone>-w<mur>-s<étagère>-v<volume>:<page>`.
+        Jusqu'à 3 018 caractères. Le serveur la reçoit telle quelle et ne la corrige pas.
+        Le paramètre n'a volontairement pas de motif : une adresse mal écrite doit
+        arriver jusqu'au contrôleur pour recevoir une erreur du contrat.
+      schema:
+        type: string
+      examples:
+        premiere:
+          summary: La toute première page
+          value: 0-w1-s1-v1:1
+        courte:
+          summary: Une adresse courte
+          value: babel-w2-s3-v17:204
+    BibliothequeRequete:
+      name: bibliotheque
+      in: query
+      required: false
+      description: |
+        La bibliothèque de la page. Absente ou égale à votre identifiant : la bibliothèque
+        locale. Inconnue de votre serveur : `404 ERR_UNKNOWN_LIBRARY`.
+      schema:
+        $ref: '#/components/schemas/IdentifiantBibliotheque'
+    IdentifiantChemin:
+      name: identifiant
+      in: path
+      required: true
+      description: L'identifiant d'une bibliothèque du réseau, la vôtre comprise.
+      schema:
+        $ref: '#/components/schemas/IdentifiantBibliotheque'
+    IdChemin:
+      name: id
+      in: path
+      required: true
+      description: L'identifiant de la ressource, tel que le donne la liste.
+      schema:
+        $ref: '#/components/schemas/Id'
+    SlugChemin:
+      name: slug
+      in: path
+      required: true
+      description: Le slug du lien court.
+      schema:
+        $ref: '#/components/schemas/Slug'
+    Lot:
+      name: lot
+      in: query
+      required: false
+      description: Le numéro du lot demandé, à partir de 1. Mal écrit ou hors limites, il est refusé (`ERR_INVALID_PARAMETER`).
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Taille:
+      name: taille
+      in: query
+      required: false
+      description: Le nombre d'éléments par lot, de 1 à 50. Mal écrit ou hors limites, il est refusé (`ERR_INVALID_PARAMETER`).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 20
+
+  headers:
+    RetryAfter:
+      description: Le nombre de secondes à attendre avant de réessayer.
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    TropDeRequetes:
+      description: Le quota est dépassé (A10). Sur la porte réseau, ce n'est pas un échec du pair.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            quota:
+              value:
+                erreurs:
+                  - code: ERR_TOO_MANY_REQUESTS
+                    champ: null
+                    message: Trop de requêtes, réessayez dans 30 secondes.
+    ParametreRefuse:
+      description: Un paramètre ou un champ du corps est absent, mal écrit ou hors limites. Toutes les erreurs sont renvoyées d'un coup.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            tailleTropGrande:
+              value:
+                erreurs:
+                  - code: ERR_INVALID_PARAMETER
+                    champ: taille
+                    message: La taille doit être comprise entre 1 et 50.
+            inscription:
+              summary: Deux champs refusés à l'inscription
+              value:
+                erreurs:
+                  - code: ERR_INVALID_PARAMETER
+                    champ: email
+                    message: L'email n'est pas valide.
+                  - code: ERR_INVALID_PARAMETER
+                    champ: mot_de_passe
+                    message: Le mot de passe doit faire au moins 8 caractères.
+    AdresseRefusee:
+      description: |
+        L'adresse est mal écrite (au moins une erreur de forme), ou un autre champ est
+        refusé. Les erreurs d'adresse viennent du moteur ou de `valider` (F5).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            plusieursErreurs:
+              summary: ABC-w9-s1-v1:1, deux erreurs renvoyées d'un coup (422, car l'une est de forme)
+              value:
+                erreurs:
+                  - code: ERR_INVALID_HEX_CHARS
+                    champ: hexagone
+                    message: L'hexagone ne peut contenir que les chiffres 0 à 9 et les lettres minuscules a à z.
+                  - code: ERR_OUT_OF_BOUNDS
+                    champ: mur
+                    message: Le mur doit être compris entre 1 et 4.
+            adresseDeLivre:
+              summary: 0-w1-s1-v1, une adresse de livre ne se lit pas
+              value:
+                erreurs:
+                  - code: ERR_INVALID_ADDRESS_SYNTAX
+                    champ: page
+                    message: 'La page est absente ou mal écrite : un nombre décimal sans zéro de tête ni signe.'
+    PageInexistante:
+      description: L'adresse est bien écrite, mais la page n'existe pas (seulement des `ERR_OUT_OF_BOUNDS`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            volumeHorsLimites:
+              summary: Il n'y a que 32 volumes
+              value:
+                erreurs:
+                  - code: ERR_OUT_OF_BOUNDS
+                    champ: volume
+                    message: Le volume doit être compris entre 1 et 32.
+    PageInexistanteApp:
+      description: |
+        La page n'existe pas (seulement des `ERR_OUT_OF_BOUNDS`), la bibliothèque est
+        inconnue de votre serveur (`ERR_UNKNOWN_LIBRARY`), ou la ressource visée
+        n'existe pas (`ERR_NOT_FOUND`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            volumeHorsLimites:
+              value:
+                erreurs:
+                  - code: ERR_OUT_OF_BOUNDS
+                    champ: volume
+                    message: Le volume doit être compris entre 1 et 32.
+            bibliothequeInconnue:
+              value:
+                erreurs:
+                  - code: ERR_UNKNOWN_LIBRARY
+                    champ: bibliotheque
+                    message: Cette bibliothèque ne fait pas partie du réseau.
+    RechercheRefusee:
+      description: Le texte ou le mode est refusé (une seule erreur, contrôles dans l'ordre mode, texte vide, longueur).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            videApresNormalisation:
+              summary: Le texte « ?! » est vide une fois normalisé
+              value:
+                erreurs:
+                  - code: ERR_EMPTY_QUERY
+                    champ: texte
+                    message: Le texte recherché est vide.
+            modeInconnu:
+              summary: Le mode « Exact » n'existe pas (la casse compte)
+              value:
+                erreurs:
+                  - code: ERR_UNKNOWN_MODE
+                    champ: mode
+                    message: Le mode doit être exact, bruit ou page.
+    Introuvable:
+      description: |
+        La ressource n'existe pas, n'est pas publique, est masquée ou appartient à un
+        autre membre (`ERR_NOT_FOUND`), ou la bibliothèque est inconnue de votre serveur
+        (`ERR_UNKNOWN_LIBRARY`). Toujours la même réponse, pour ne rien laisser deviner.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            inconnue:
+              value:
+                erreurs:
+                  - code: ERR_NOT_FOUND
+                    champ: id
+                    message: Cette ressource n'existe pas ou n'est pas visible.
+            bibliothequeInconnue:
+              value:
+                erreurs:
+                  - code: ERR_UNKNOWN_LIBRARY
+                    champ: identifiant
+                    message: Cette bibliothèque ne fait pas partie du réseau.
+    NonConnecte:
+      description: |
+        Pas de jeton de session, jeton invalide ou révoqué (`ERR_UNAUTHENTICATED`), ou
+        email et mot de passe qui ne correspondent pas (`ERR_INVALID_CREDENTIALS`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            sansJeton:
+              value:
+                erreurs:
+                  - code: ERR_UNAUTHENTICATED
+                    champ: null
+                    message: Connectez-vous pour continuer.
+            identifiantsFaux:
+              value:
+                erreurs:
+                  - code: ERR_INVALID_CREDENTIALS
+                    champ: null
+                    message: Email ou mot de passe incorrect.
+    Interdit:
+      description: Compte suspendu (`ERR_ACCOUNT_SUSPENDED`) ou inscriptions fermées (`ERR_REGISTRATION_CLOSED`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            suspendu:
+              value:
+                erreurs:
+                  - code: ERR_ACCOUNT_SUSPENDED
+                    champ: null
+                    message: Ce compte est suspendu.
+            fermees:
+              value:
+                erreurs:
+                  - code: ERR_REGISTRATION_CLOSED
+                    champ: null
+                    message: Les inscriptions sont fermées.
+    Doublon:
+      description: La ressource existe déjà (`ERR_ALREADY_EXISTS`) ; `champ` dit sur quoi porte le doublon.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            emailPris:
+              value:
+                erreurs:
+                  - code: ERR_ALREADY_EXISTS
+                    champ: email
+                    message: Un compte utilise déjà cet email.
+            dejaGardee:
+              value:
+                erreurs:
+                  - code: ERR_ALREADY_EXISTS
+                    champ: adresse
+                    message: Cette page est déjà dans vos marque-pages.
+    LienExpire:
+      description: Le lien court a expiré (`ERR_SHORT_LINK_EXPIRED`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            expire:
+              value:
+                erreurs:
+                  - code: ERR_SHORT_LINK_EXPIRED
+                    champ: slug
+                    message: Ce lien a expiré.
+    PairInjoignable:
+      description: |
+        Le pair n'a pas répondu dans les 2 secondes, est éteint, ou a répondu hors contrat
+        (`ERR_PEER_UNREACHABLE`). Le compteur d'échecs du pair augmente (A9).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            injoignable:
+              value:
+                erreurs:
+                  - code: ERR_PEER_UNREACHABLE
+                    champ: bibliotheque
+                    message: La bibliothèque voisine ne répond pas.
+    PairOccupe:
+      description: |
+        Le pair a répondu `429` (`ERR_PEER_BUSY`). Ce n'est pas un échec : son compteur
+        ne bouge pas. `Retry-After` reprend la valeur donnée par le pair, si elle existe.
+      headers:
+        Retry-After:
+          description: Le nombre de secondes à attendre, si le pair l'a donné.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            occupe:
+              value:
+                erreurs:
+                  - code: ERR_PEER_BUSY
+                    champ: bibliotheque
+                    message: La bibliothèque voisine est occupée, réessayez plus tard.
+    ImportRefuse:
+      description: Le fichier ne respecte pas le schéma `ExportCompte` ; rien n'est importé (`ERR_INVALID_IMPORT`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReponseErreur'
+          examples:
+            adresseInvalide:
+              value:
+                erreurs:
+                  - code: ERR_INVALID_IMPORT
+                    champ: marque_pages[3].adresse
+                    message: Cette adresse est mal écrite.
+                  - code: ERR_INVALID_IMPORT
+                    champ: format
+                    message: Le format doit être babel-export/v1.
+
+  schemas:
+    # ---------------------------------------------------------------
+    # Briques communes
+    # ---------------------------------------------------------------
+
+    IdentifiantBibliotheque:
+      type: string
+      description: |
+        L'identifiant stable d'une bibliothèque, remis par la plateforme. Il ne change
+        jamais, contrairement à son URL.
+      pattern: '^[a-z0-9][a-z0-9-]{1,31}$'
+      examples: [exemple]
+
+    Id:
+      type: string
+      description: |
+        L'identifiant d'une ressource (collection, annotation, marque-page, recherche…),
+        opaque pour l'application web et les autres bibliothèques : un nombre écrit en
+        chaîne, un UUID… Toujours renvoyé **en chaîne** (`"12"`, pas `12`).
+      pattern: '^[A-Za-z0-9_-]{1,64}$'
+      examples: ['12']
+
+    Slug:
+      type: string
+      description: Le slug d'un lien court, choisi par le serveur.
+      pattern: '^[A-Za-z0-9_-]{4,32}$'
+      examples: [k7Hq2x]
+
+    Empreinte:
+      type: string
+      description: 64 caractères hexadécimaux minuscules (SHA-256 ou HMAC-SHA256).
+      pattern: '^[0-9a-f]{64}$'
+      examples: [f85a8e8ae6a8a1ceb96d8884d2d45c00c3cc73c95e1bdf4e5cba35664bb0c637]
+
+    AdressePage:
+      type: string
+      description: |
+        Une adresse de page bien écrite : `<hexagone>-w<mur>-s<étagère>-v<volume>:<page>`.
+        Hexagone en base 36 minuscule sans zéro de tête (au plus 3 004 caractères), mur
+        1 à 4, étagère 1 à 5, volume 1 à 32, page 1 à 410, sans zéro de tête.
+        Le motif ne vérifie pas le dernier hexagone, qui ne contient qu'une page : c'est
+        le rôle de `valider` (F5).
+      maxLength: 3018
+      pattern: '^(0|[1-9a-z][0-9a-z]{0,3003})-w[1-4]-s[1-5]-v([1-9]|[12][0-9]|3[0-2]):([1-9]|[1-9][0-9]|[1-3][0-9]{2}|40[0-9]|410)$'
+      examples: [0-w1-s1-v1:1, babel-w2-s3-v17:204]
+
+    AdresseLivre:
+      type: string
+      description: L'adresse d'un livre entier, sans `:<page>`.
+      maxLength: 3014
+      pattern: '^(0|[1-9a-z][0-9a-z]{0,3003})-w[1-4]-s[1-5]-v([1-9]|[12][0-9]|3[0-2])$'
+      examples: [babel-w2-s3-v17]
+
+    AdresseCible:
+      type: string
+      description: Une adresse de page ou de livre (sans `:<page>`). Seul un lien court peut viser un livre.
+      maxLength: 3018
+      pattern: '^(0|[1-9a-z][0-9a-z]{0,3003})-w[1-4]-s[1-5]-v([1-9]|[12][0-9]|3[0-2])(:([1-9]|[1-9][0-9]|[1-3][0-9]{2}|40[0-9]|410))?$'
+      examples: [babel-w2-s3-v17, babel-w2-s3-v17:204]
+
+    TextePage:
+      type: string
+      description: Le texte d'une page, exactement 3 200 caractères pris parmi les 29 symboles.
+      minLength: 3200
+      maxLength: 3200
+      pattern: '^[a-z ,.]{3200}$'
+
+    TexteNormalise:
+      type: string
+      description: |
+        Un texte passé par les 5 étapes de la normalisation (F3) : les 29 symboles,
+        sans espace en bord ni espaces qui se suivent. De 1 à 3 200 caractères.
+      minLength: 1
+      maxLength: 3200
+      pattern: '^[a-z,.]+( [a-z,.]+)*$'
+
+    Mode:
+      type: string
+      description: |
+        `exact` : le texte seul, le reste de la page en espaces.
+        `bruit` : le texte entouré de caractères pseudo-aléatoires.
+        `page` : le texte fait exactement 3 200 caractères, on obtient l'adresse de cette
+        page. L'interface ne propose que `exact` et `bruit` (V5).
+      enum: [exact, bruit, page]
+
+    DateHeure:
+      type: string
+      format: date-time
+      description: Date et heure ISO 8601 avec fuseau, par exemple `2026-11-20T14:05:00+01:00`.
+
+    DateHeureOuNull:
+      oneOf:
+        - $ref: '#/components/schemas/DateHeure'
+        - type: 'null'
+
+    UrlOuNull:
+      type: [string, 'null']
+      format: uri
+      description: Une URL absolue, ou `null`.
+
+    PageDesignee:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, adresse]
+      description: Une page et la bibliothèque où la lire.
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+
+    DemandePageDesignee:
+      type: object
+      required: [adresse]
+      description: Une page désignée dans une requête. `bibliotheque` absente vaut la bibliothèque locale.
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          type: string
+          description: L'adresse de page, contrôlée par `valider` (F5).
+
+    # ---------------------------------------------------------------
+    # Porte réseau
+    # ---------------------------------------------------------------
+
+    Identite:
+      type: object
+      additionalProperties: false
+      required: [identifiant, nom, description, empreinte_cle, algorithme, contrat, application_web]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Le nom de la bibliothèque (A8).
+        description:
+          type: string
+          maxLength: 1000
+          description: Sa description (A8). Chaîne vide si elle n'en a pas.
+        empreinte_cle:
+          $ref: '#/components/schemas/Empreinte'
+          description: L'empreinte de la clé, `$moteur->empreinte()` telle quelle (F8).
+        algorithme:
+          type: string
+          const: babel-moteur/v1
+          description: La version de l'algorithme du moteur, `Moteur::ALGORITHME`.
+        contrat:
+          type: string
+          pattern: '^1\.[0-9]+\.[0-9]+$'
+          description: La version de ce contrat que la bibliothèque respecte (1.x).
+        application_web:
+          $ref: '#/components/schemas/UrlOuNull'
+          description: |
+            L'adresse publique de son application web, si elle en a une en ligne. Les pairs
+            peuvent proposer d'y ouvrir une page (V16, V21).
+
+    Page:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, adresse, texte]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+          description: L'adresse demandée, identique à l'octet près.
+        texte:
+          $ref: '#/components/schemas/TextePage'
+
+    DemandeLectures:
+      type: object
+      required: [adresses]
+      properties:
+        adresses:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: De 1 à 50 adresses de page. Au-delà, `ERR_INVALID_PARAMETER` sur `adresses`.
+          items:
+            type: string
+
+    ResultatLectures:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, elements]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        elements:
+          type: array
+          description: Une entrée par adresse demandée, dans le même ordre. Soit `texte`, soit `erreurs`, l'autre vaut `null`.
+          items:
+            type: object
+            additionalProperties: false
+            required: [adresse, texte, erreurs]
+            properties:
+              adresse:
+                type: string
+                description: L'adresse demandée, telle quelle.
+              texte:
+                oneOf:
+                  - $ref: '#/components/schemas/TextePage'
+                  - type: 'null'
+              erreurs:
+                oneOf:
+                  - type: array
+                    minItems: 1
+                    items:
+                      $ref: '#/components/schemas/Erreur'
+                  - type: 'null'
+
+    DemandeRecherche:
+      type: object
+      required: [texte, mode]
+      properties:
+        texte:
+          type: string
+          description: |
+            Le texte à chercher, tel que la personne l'a saisi : le serveur le normalise.
+            En mode `page`, le texte brut d'une page (3 200 caractères après les étapes 1 à 3).
+        mode:
+          $ref: '#/components/schemas/Mode'
+
+    ResultatRecherche:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, texte_normalise, mode, adresse]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        texte_normalise:
+          type: string
+          minLength: 1
+          maxLength: 3200
+          pattern: '^[a-z ,.]+$'
+          description: |
+            Le texte réellement cherché, après normalisation (V6). En modes `exact` et
+            `bruit`, il respecte `TexteNormalise` ; en mode `page`, il fait 3 200 caractères.
+        mode:
+          $ref: '#/components/schemas/Mode'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+          description: L'adresse d'une page qui contient le texte.
+
+    ResumeCollection:
+      type: object
+      additionalProperties: false
+      required: [id, nom, description, nombre_pages, maj_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+          description: Chaîne vide si la collection n'en a pas.
+        nombre_pages:
+          type: integer
+          minimum: 0
+          description: Le nombre de pages montrées, celles marquées par un texte banni non comptées.
+        maj_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    Collection:
+      type: object
+      additionalProperties: false
+      required: [id, nom, description, nombre_pages, maj_le, pages]
+      description: Une collection publique, vue par le public. Les champs de `ResumeCollection`, plus les pages.
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        nombre_pages:
+          type: integer
+          minimum: 0
+        maj_le:
+          $ref: '#/components/schemas/DateHeure'
+        pages:
+          type: array
+          description: Les pages montrées, par position croissante.
+          items:
+            type: object
+            additionalProperties: false
+            required: [position, bibliotheque, adresse]
+            properties:
+              position:
+                type: integer
+                minimum: 1
+              bibliotheque:
+                $ref: '#/components/schemas/IdentifiantBibliotheque'
+              adresse:
+                $ref: '#/components/schemas/AdressePage'
+
+    ListeCollections:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+          description: Le nombre total de collections publiques et non masquées.
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/ResumeCollection'
+
+    PagePopulaire:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, adresse, score]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+        score:
+          type: integer
+          description: Total anonyme, votes et marque-pages. Plus il est grand, plus la page est populaire.
+
+    ListePagesPopulaires:
+      type: object
+      additionalProperties: false
+      required: [elements]
+      properties:
+        elements:
+          type: array
+          maxItems: 50
+          description: Par score décroissant.
+          items:
+            $ref: '#/components/schemas/PagePopulaire'
+
+    TexteBanni:
+      type: object
+      additionalProperties: false
+      required: [texte, empreinte, motif, banni_le]
+      properties:
+        texte:
+          $ref: '#/components/schemas/TexteNormalise'
+          description: Le texte banni lui-même, normalisé. C'est lui que les pairs cherchent chez eux.
+        empreinte:
+          $ref: '#/components/schemas/Empreinte'
+          description: |
+            SHA-256 en hexadécimal minuscule du texte (octets UTF-8), `hash('sha256', $texte)`.
+            Elle sert à repérer les doublons, pas à chercher.
+        motif:
+          type: [string, 'null']
+          maxLength: 500
+          description: Le motif donné par votre administrateur, pour aider les autres à décider.
+        banni_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    ListeTextesBannis:
+      type: object
+      additionalProperties: false
+      required: [elements]
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: '#/components/schemas/TexteBanni'
+
+    # ---------------------------------------------------------------
+    # Porte application : bibliothèque et réseau
+    # ---------------------------------------------------------------
+
+    Infos:
+      type: object
+      additionalProperties: false
+      required: [identifiant, nom, description, empreinte_cle, algorithme, contrat, application_web, inscriptions_ouvertes, constantes, limites, reseau, temps_reel]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        empreinte_cle:
+          $ref: '#/components/schemas/Empreinte'
+        algorithme:
+          type: string
+          const: babel-moteur/v1
+        contrat:
+          type: string
+          pattern: '^1\.[0-9]+\.[0-9]+$'
+        application_web:
+          $ref: '#/components/schemas/UrlOuNull'
+        inscriptions_ouvertes:
+          type: boolean
+          description: Faux quand l'administrateur a fermé les inscriptions (A8).
+        constantes:
+          type: object
+          additionalProperties: false
+          description: Les constantes du moteur, identiques dans les 10 bibliothèques.
+          required: [alphabet, longueur_page, murs, etageres, volumes, pages, longueur_max_hexagone, dernier_hexagone]
+          properties:
+            alphabet:
+              type: string
+              const: 'abcdefghijklmnopqrstuvwxyz ,.'
+            longueur_page:
+              type: integer
+              const: 3200
+            murs:
+              type: integer
+              const: 4
+            etageres:
+              type: integer
+              const: 5
+            volumes:
+              type: integer
+              const: 32
+            pages:
+              type: integer
+              const: 410
+            longueur_max_hexagone:
+              type: integer
+              const: 3004
+            dernier_hexagone:
+              type: string
+              description: |
+                Le nom du dernier hexagone, en base 36. Il ne contient que la page
+                `w1-s1-v1:1` : `voisine` (F6) s'en sert pour signaler `ERR_LIBRARY_LIMIT`.
+                Dans le navigateur, comparez les hexagones avec `BigInt`, jamais avec `Number`.
+              const: '4rlo36cpsg3r9uo1m4u31xzyrdgxzzyetdjtaspaxfwezpotrgjhvmwpufkawoqdnkci9o3dg02dnt8462nd1kza9duahthyjk3o5gupzj3gkw4h8z82uc7i2gxsc1lbb3hkll667w6ttuv31p5xav2hv2ltbckjcsfuh7xslgbw1586qf5499k9koskdt1edfqt3jmcw2ophmw221awvktt56dv7uopk6dzh6nb96r1folx4y8gsi7lrf6sf4aix2xt624uo67hgobdv346zh9zfsfwpkxqvawmh11z6f2d4n653w7lgwsfs7q6hx82aezjualz2dxz83h3o9gbqz36m66eixdieh7hoy1jsn6ijwno2f6p42mq4hhk9ba7erxkltseypenxshxl0g34py0iihucs1sxfff78kpqb2bwdgq8ujfya74o6hzffuqpsc37oyqeerwlcwy918w02hfj5hubt8acqkwyk1623q6isc20sf3gu3cub6qdmyftfz3jbuwh0gja7yl7a1vhahz5slhylxienqxm04dief4jo0djjqbpirdu2py2mvu41k7cf047rl3m0atxrtagpzp8chlsk6w76zntbz9m7fxsh9zz8d79omw2epryjhno1asg6afx6fuzd86612gcwr1wh5k7az9tj3v77pwucocsrqcib5a9yu1zoq5lyk42txrt8yh2m8fck1u0zhsyvn0pk9qs1t0x5d6xyh99ddtq4tfncg4lki0i8oc8cts10mc2pgaxervh8ifd2ddiq5b287lw7ayl3q97figtkq1jl8mljqh0qv3qja3nnqdu0e87ojddtgw4kmk3poslmjpv4gq4opoux4ibg6ilrw30f0fddgv7ro2d462t752op75drn66wwj460lg45xezc8pebavwcvlj26mo5elsiipvn9woebiuko606u4fda2lyamj8sg0u573zrd1zo4q5or0ggjwunqypwos06u0v4qy8za3jolj5ciuy87zl3nej0u2ie7rj5zqtezxnj7gxwsr1hhsqrjvilwms87dc6ewkybdzd7vvy2ez60ekkcco9bj40f6vqeui28q4backmzv7i23w5mcj82np6jqbb8gpq7sm2wq0f3m4e9ef6fioo0j498reysyvtrzz98eh4fpr10el6gzmw3a1feig70dx952kf1e0rf2f2yaq8is8ka6xssf1h1k3nqzxfwxt1u1qpuvh79mkuau4k02poxepjxlv63pyo8q0luvsctcrxd1dowguh7m31ljz9nx0g06409ohawt2rm6cyd2emdpsmpnliquv6kojulek8coqy0397q2u4z7t55afnd3109uynjrogv3bohem4h3hr2xg9g0khciktccxwzb35wivwckk41qn45pcsfmc7hwmypggerj9g7cewv0ayc5o3iuob5tqzwfqkmd0jny6uihqi22mqwowrt50ulj4rtkacz5v8f65rt2nslpi2p9rx50ksoxx3qw9sdcp7nyo2ssw1beuuj742866izfzt33u9lfpvyilbiftgd6eke3canjj4x9vfkca22dueuq90hru91tz5wvtbczw5mscyv9bv3zy74im7alk2z726rhk3f5f5qzczj8kd16fyzhu7x1t2hrrzoos19cochomiwa97wc0cyb1s0jrb4c7fets6feoxa7taqd2k5v92kp52a3kav79o23h4j5zwlfcukqpn89sm1kbizcuu1v6hksrv0i3u2j2i8h2xzntpg649a7pqjz7zvu15n7yvdnp479ncmqprxsqrcl7bw9apud99z3gv9omt9xowjobqzkprlxryxbe9ficaj7jcj6yvxn7aji7hu2mvqez8lo54u1q77ax9lbd5itr2tnqsr3zky65wmgera7u6vg7o9rr1nj17o7gqbgr19f3e981r18sao17d7ys8mx7dzvgi3b8m3ba5hymcmieo6caz81g8unxaj2fksk0iqqjtmmmjpv3jke4meiz9bqo06gsaw3fnxqjhfr3esoko1ivgh4bi5oakddje6yiwydo2w0ta7oa6zr5etlpapm1nngwvzwrzy9hyrmskgiu1k7pwfk343gcr3prfehedbfubyd6c9mvke3gsfmejxf2xfeain6lt25t0rtijmyjflv3uj1gu4ld95gf55ba241a9wncdmgp6tusmjqfvwcw6jrjk7pp29ciggaloa6wx8yf8s3x6xvcj7r98ay0ef241ws0u08vmcvd8mu9te33nkiflnku5xfgui40kiywjdjlhjpw0ca9mbquhf5bnyqg8ffxdwzv3sdho9ho43ey3sc0ahpzpyhcouif3kmterws3f6eg3rbvh0w969xih80uibkequuasftcexgpzcmz85xc6se7q4d6q7xicemjr4k6p3rvbqpjmnibc9nv95o21l5h0rzz6qqs3cxuf3aoevihz6bhgtckoa293lu8o0lvyw0i8vl9yd6dkkfkzsiew8cdumjrpa0cp4sdy13hdfswpwv2bqvhvbizd195bppdhuxj8lbjfmabqa879gxfw19alj2z3565pqfpsaednn2wrechh4q3hltsvafhgd7acurxchwcqr6j3dz6n1ve069j3cycurubct83k8umyvgk9xd7fnpso253k0w3x193z1ikx6n4aq6bm1ygdm7993jf2w7yao8h9dlmbl6v0mb4mhyzbxedlj4oaiuvksrw1qed8et4fukgqeq92bjqrh872542zu7gedw8tw87vgtlqc5uyozoyysh66x2sd9o8vttpl1iralfwhst5kmnwt1up25v9zoiro3vo918y42deuc6swf2wki53ae3lqwtsdtpxa9jm17j9adziplit59lqs3fhk1epi1musrtp39un3y0xxx8r9s1wq8n3eqgwrcbjfjbit599fy3zeyy5jslwckwkamz1e7e82w1bnp6'
+        limites:
+          type: object
+          additionalProperties: false
+          description: Les limites que le serveur applique, pour que l'application web contrôle les saisies avant l'envoi.
+          required: [taille_lot_max, annotation_max, motif_signalement_max, nom_collection_max, description_collection_max, pseudo_max, mot_de_passe_min, duree_lien_visiteur_jours, import_max_octets]
+          properties:
+            taille_lot_max:
+              type: integer
+              const: 50
+            annotation_max:
+              type: integer
+              const: 2000
+            motif_signalement_max:
+              type: integer
+              const: 500
+            nom_collection_max:
+              type: integer
+              const: 100
+            description_collection_max:
+              type: integer
+              const: 1000
+            pseudo_max:
+              type: integer
+              const: 30
+            mot_de_passe_min:
+              type: integer
+              const: 8
+            duree_lien_visiteur_jours:
+              type: integer
+              minimum: 1
+              description: La durée maximale d'un lien court créé sans compte, choisie par la bibliothèque.
+            import_max_octets:
+              type: integer
+              const: 10485760
+        reseau:
+          type: object
+          additionalProperties: false
+          required: [delai_pair_ms]
+          properties:
+            delai_pair_ms:
+              type: integer
+              const: 2000
+              description: Le délai accordé à chaque pair (contrat). Le délai global d'une recherche réseau est fixé par l'application web.
+        temps_reel:
+          description: |
+            Les paramètres de connexion au serveur temps réel (protocole Pusher : Laravel
+            Reverb côté serveur, Laravel Echo et `pusher-js` côté Angular). `null` si la
+            bibliothèque n'a pas de temps réel : l'application web interroge alors
+            `GET /app/recherches-reseau/{identifiant}`.
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [protocole, cle, hote, port, tls]
+              properties:
+                protocole:
+                  type: string
+                  const: pusher
+                cle:
+                  type: string
+                  description: La clé publique de l'application Reverb (`REVERB_APP_KEY`). Ce n'est pas un secret.
+                hote:
+                  type: string
+                  description: L'hôte du serveur temps réel, vu depuis le navigateur.
+                port:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                tls:
+                  type: boolean
+                  description: Vrai pour une connexion `wss://`.
+
+    BibliothequeReseau:
+      type: object
+      additionalProperties: false
+      required: [identifiant, nom, description, est_locale, etat, dernier_contact_le, cle_changee_le, application_web]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        est_locale:
+          type: boolean
+          description: Vrai pour votre bibliothèque, et pour elle seule.
+        etat:
+          type: string
+          enum: [en_ligne, hors_ligne, inconnu]
+          description: |
+            `hors_ligne` après le troisième échec de suite, jusqu'au prochain contrôle réussi
+            (livrable 4, choix 8). `inconnu` tant qu'aucun contrôle n'a eu lieu. La
+            bibliothèque locale est toujours `en_ligne`.
+        dernier_contact_le:
+          $ref: '#/components/schemas/DateHeureOuNull'
+        cle_changee_le:
+          $ref: '#/components/schemas/DateHeureOuNull'
+          description: |
+            Daté quand l'empreinte de clé publiée par cette bibliothèque a changé (A9) :
+            les adresses enregistrées vers elle ne désignent plus les mêmes textes.
+        application_web:
+          $ref: '#/components/schemas/UrlOuNull'
+
+    ListeBibliotheques:
+      type: object
+      additionalProperties: false
+      required: [elements]
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: '#/components/schemas/BibliothequeReseau'
+
+    # ---------------------------------------------------------------
+    # Porte application : comptes
+    # ---------------------------------------------------------------
+
+    Utilisateur:
+      type: object
+      additionalProperties: false
+      required: [id, pseudo, email, role, cree_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        pseudo:
+          type: string
+          minLength: 1
+          maxLength: 30
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [membre, admin]
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    AuteurPublic:
+      type: object
+      additionalProperties: false
+      required: [pseudo]
+      description: "Ce qu'on montre de l'auteur d'un contenu public : son pseudo, rien d'autre."
+      properties:
+        pseudo:
+          type: string
+
+    DemandeInscription:
+      type: object
+      required: [pseudo, email, mot_de_passe]
+      properties:
+        pseudo:
+          type: string
+          minLength: 1
+          maxLength: 30
+        email:
+          type: string
+          format: email
+          description: Sert d'identifiant de connexion. Unique dans la bibliothèque.
+        mot_de_passe:
+          type: string
+          minLength: 8
+          writeOnly: true
+
+    DemandeConnexion:
+      type: object
+      required: [email, mot_de_passe]
+      properties:
+        email:
+          type: string
+        mot_de_passe:
+          type: string
+          writeOnly: true
+
+    Session:
+      type: object
+      additionalProperties: false
+      required: [jeton, type, utilisateur]
+      properties:
+        jeton:
+          type: string
+          minLength: 1
+          description: "Le jeton de session, à garder par l'application web et à envoyer dans `Authorization: Bearer …`."
+        type:
+          type: string
+          const: Bearer
+        utilisateur:
+          $ref: '#/components/schemas/Utilisateur'
+
+    ModificationProfil:
+      type: object
+      minProperties: 1
+      properties:
+        pseudo:
+          type: string
+          minLength: 1
+          maxLength: 30
+        email:
+          type: string
+          format: email
+        mot_de_passe:
+          type: string
+          minLength: 8
+          writeOnly: true
+          description: Le nouveau mot de passe.
+        mot_de_passe_actuel:
+          type: string
+          writeOnly: true
+          description: Obligatoire pour changer l'email ou le mot de passe.
+
+    DemandeSuppressionCompte:
+      type: object
+      required: [mot_de_passe]
+      properties:
+        mot_de_passe:
+          type: string
+          writeOnly: true
+
+    # ---------------------------------------------------------------
+    # Porte application : lecture et votes
+    # ---------------------------------------------------------------
+
+    PageLue:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, adresse, adresse_livre, texte, score, mon_vote, marque_page, annotations]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+        adresse_livre:
+          $ref: '#/components/schemas/AdresseLivre'
+          description: L'adresse du livre qui contient la page, pour un lien court vers le livre entier (V11).
+        texte:
+          $ref: '#/components/schemas/TextePage'
+        score:
+          type: integer
+          description: Le score de la page chez vous (votes et marque-pages de vos membres), même formule que les pages populaires.
+        mon_vote:
+          type: [integer, 'null']
+          enum: [1, -1, null]
+          description: Le vote du membre connecté ; `null` sans vote ou pour un visiteur.
+        marque_page:
+          description: Le marque-page du membre connecté sur cette page ; `null` sinon.
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [id, titre]
+              properties:
+                id:
+                  $ref: '#/components/schemas/Id'
+                titre:
+                  type: [string, 'null']
+        annotations:
+          type: array
+          description: |
+            Les annotations publiques non masquées, et celles du membre connecté (privées
+            comprises), de la plus récente à la plus ancienne. L'application web retire
+            celles que la personne a signalées (V18).
+          items:
+            $ref: '#/components/schemas/Annotation'
+
+    DemandeVote:
+      type: object
+      required: [valeur]
+      properties:
+        valeur:
+          type: integer
+          enum: [1, -1]
+
+    EtatVote:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, adresse, mon_vote, score]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+        mon_vote:
+          type: [integer, 'null']
+          enum: [1, -1, null]
+        score:
+          type: integer
+          description: Le score de la page après le vote.
+
+    Vote:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, adresse, valeur, cree_le]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+        valeur:
+          type: integer
+          enum: [1, -1]
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    ListeVotes:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/Vote'
+
+    # ---------------------------------------------------------------
+    # Porte application : recherche réseau
+    # ---------------------------------------------------------------
+
+    IdentifiantRecherche:
+      type: string
+      format: uuid
+      description: Un UUID v4 tiré par l'application web (`crypto.randomUUID()`).
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+
+    DemandeRechercheReseau:
+      type: object
+      required: [identifiant, texte, mode]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantRecherche'
+        texte:
+          type: string
+          description: Le texte saisi ; le serveur le normalise une fois et envoie le texte normalisé aux pairs.
+        mode:
+          $ref: '#/components/schemas/Mode'
+
+    RechercheReseauLancee:
+      type: object
+      additionalProperties: false
+      required: [identifiant, texte_normalise, mode, locale, interroges, absents, delai_pair_ms, canal]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantRecherche'
+        texte_normalise:
+          type: string
+          minLength: 1
+          maxLength: 3200
+        mode:
+          $ref: '#/components/schemas/Mode'
+        locale:
+          $ref: '#/components/schemas/PageDesignee'
+          description: L'adresse trouvée chez vous par le moteur.
+        interroges:
+          type: array
+          description: Les pairs en ligne, interrogés. Un événement `resultat` arrivera pour chacun.
+          items:
+            $ref: '#/components/schemas/IdentifiantBibliotheque'
+        absents:
+          type: array
+          description: Les pairs hors ligne, non interrogés. Ils comptent parmi les absents du bilan.
+          items:
+            $ref: '#/components/schemas/IdentifiantBibliotheque'
+        delai_pair_ms:
+          type: integer
+          const: 2000
+        canal:
+          type: string
+          description: Le nom du canal temps réel, `recherche-reseau.{identifiant}`.
+
+    ResultatPair:
+      type: object
+      additionalProperties: false
+      required: [bibliotheque, statut, adresse, texte_normalise, recu_le]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        statut:
+          type: string
+          enum: [trouve, sans_reponse, occupe]
+          description: |
+            `trouve` : le pair a répondu dans le contrat. `sans_reponse` : éteint, trop lent
+            ou hors contrat (son compteur d'échecs augmente). `occupe` : il a répondu `429`
+            (pas un échec).
+        adresse:
+          description: L'adresse trouvée chez ce pair, à lire avec `GET /app/pages/{adresse}?bibliotheque=…` ; `null` sauf si `trouve`.
+          oneOf:
+            - $ref: '#/components/schemas/AdressePage'
+            - type: 'null'
+        texte_normalise:
+          type: [string, 'null']
+          description: Le texte normalisé renvoyé par le pair. S'il diffère du vôtre, l'un des deux applique mal F3.
+        recu_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    EtatRechercheReseau:
+      type: object
+      additionalProperties: false
+      required: [identifiant, texte_normalise, mode, etat, locale, interroges, absents, resultats, lancee_le]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantRecherche'
+        texte_normalise:
+          type: string
+          minLength: 1
+          maxLength: 3200
+        mode:
+          $ref: '#/components/schemas/Mode'
+        etat:
+          type: string
+          enum: [en_cours, terminee]
+        locale:
+          $ref: '#/components/schemas/PageDesignee'
+        interroges:
+          type: array
+          items:
+            $ref: '#/components/schemas/IdentifiantBibliotheque'
+        absents:
+          type: array
+          items:
+            $ref: '#/components/schemas/IdentifiantBibliotheque'
+        resultats:
+          type: array
+          description: Les résultats déjà arrivés, dans l'ordre d'arrivée.
+          items:
+            $ref: '#/components/schemas/ResultatPair'
+        lancee_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    EvenementResultat:
+      type: object
+      additionalProperties: false
+      description: Événement `resultat` du canal `recherche-reseau.{identifiant}`.
+      required: [identifiant, resultat]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantRecherche'
+        resultat:
+          $ref: '#/components/schemas/ResultatPair'
+
+    EvenementTerminee:
+      type: object
+      additionalProperties: false
+      description: Événement `terminee` du canal `recherche-reseau.{identifiant}`, publié quand toutes les tâches sont finies.
+      required: [identifiant, interroges, ont_repondu, absents]
+      properties:
+        identifiant:
+          $ref: '#/components/schemas/IdentifiantRecherche'
+        interroges:
+          type: integer
+          minimum: 0
+        ont_repondu:
+          type: integer
+          minimum: 0
+          description: Le nombre de pairs au statut `trouve`, pour le bilan « 7 pairs sur 9 ont répondu ».
+        absents:
+          type: array
+          description: Les pairs sans réponse, occupés ou hors ligne.
+          items:
+            $ref: '#/components/schemas/IdentifiantBibliotheque'
+
+    # ---------------------------------------------------------------
+    # Porte application : liens courts
+    # ---------------------------------------------------------------
+
+    DemandeLienCourt:
+      type: object
+      required: [cible]
+      properties:
+        cible:
+          oneOf:
+            - type: object
+              required: [type, adresse]
+              properties:
+                type:
+                  const: adresse
+                bibliotheque:
+                  $ref: '#/components/schemas/IdentifiantBibliotheque'
+                adresse:
+                  type: string
+                  description: Une adresse de page ou de livre.
+            - type: object
+              required: [type, id]
+              properties:
+                type:
+                  const: collection
+                id:
+                  $ref: '#/components/schemas/Id'
+        passage:
+          type: [string, 'null']
+          maxLength: 3200
+          description: Le texte à surligner, pour une page seulement. Il doit figurer dans la page.
+        expire_le:
+          $ref: '#/components/schemas/DateHeureOuNull'
+          description: Facultatif. Obligatoire en pratique pour un visiteur (absent = durée maximale).
+
+    CibleLienCourt:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, bibliotheque, adresse, niveau]
+          properties:
+            type:
+              const: adresse
+            bibliotheque:
+              $ref: '#/components/schemas/IdentifiantBibliotheque'
+            adresse:
+              $ref: '#/components/schemas/AdresseCible'
+            niveau:
+              type: string
+              enum: [page, livre]
+        - type: object
+          additionalProperties: false
+          required: [type, id]
+          properties:
+            type:
+              const: collection
+            id:
+              $ref: '#/components/schemas/Id'
+
+    LienCourt:
+      type: object
+      additionalProperties: false
+      required: [slug, cible, passage, visites, expire_le, cree_le]
+      properties:
+        slug:
+          $ref: '#/components/schemas/Slug'
+        cible:
+          $ref: '#/components/schemas/CibleLienCourt'
+        passage:
+          type: [string, 'null']
+        visites:
+          type: integer
+          minimum: 0
+        expire_le:
+          $ref: '#/components/schemas/DateHeureOuNull'
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    LienCourtOuvert:
+      type: object
+      additionalProperties: false
+      required: [slug, cible, passage, expire_le]
+      properties:
+        slug:
+          $ref: '#/components/schemas/Slug'
+        cible:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [type, bibliotheque, adresse, niveau, adresse_a_ouvrir]
+              properties:
+                type:
+                  const: adresse
+                bibliotheque:
+                  $ref: '#/components/schemas/IdentifiantBibliotheque'
+                adresse:
+                  $ref: '#/components/schemas/AdresseCible'
+                niveau:
+                  type: string
+                  enum: [page, livre]
+                adresse_a_ouvrir:
+                  $ref: '#/components/schemas/AdressePage'
+                  description: "La page à ouvrir : la page elle-même, ou la page 1 du livre."
+            - type: object
+              additionalProperties: false
+              required: [type, collection]
+              properties:
+                type:
+                  const: collection
+                collection:
+                  $ref: '#/components/schemas/Collection'
+        passage:
+          type: [string, 'null']
+          description: Le texte à surligner avec `localiser` (F4).
+        expire_le:
+          $ref: '#/components/schemas/DateHeureOuNull'
+
+    ListeLiensCourts:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/LienCourt'
+
+    # ---------------------------------------------------------------
+    # Porte application : marque-pages
+    # ---------------------------------------------------------------
+
+    MarquePage:
+      type: object
+      additionalProperties: false
+      required: [id, bibliotheque, adresse, titre, a_convertir, cree_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+        titre:
+          type: [string, 'null']
+          maxLength: 100
+        a_convertir:
+          type: boolean
+          description: Vrai pour une adresse importée qui désigne encore l'ancienne bibliothèque (M12).
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    DemandeMarquePage:
+      type: object
+      required: [adresse]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          type: string
+          description: L'adresse de page, contrôlée par `valider` (F5).
+        titre:
+          type: [string, 'null']
+          maxLength: 100
+
+    ModificationMarquePage:
+      type: object
+      required: [titre]
+      properties:
+        titre:
+          type: [string, 'null']
+          maxLength: 100
+
+    ListeMarquePages:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/MarquePage'
+
+    # ---------------------------------------------------------------
+    # Porte application : collections du membre
+    # ---------------------------------------------------------------
+
+    ResumeMaCollection:
+      type: object
+      additionalProperties: false
+      required: [id, nom, description, est_publique, masquee, nombre_pages, cree_le, maj_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        est_publique:
+          type: boolean
+        masquee:
+          type: boolean
+          description: Vrai si un administrateur l'a masquée (A4) ; elle n'est alors plus montrée au public.
+        nombre_pages:
+          type: integer
+          minimum: 0
+          description: Toutes les pages, masquées comprises.
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+        maj_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    MaCollection:
+      type: object
+      additionalProperties: false
+      required: [id, nom, description, est_publique, masquee, nombre_pages, cree_le, maj_le, pages]
+      description: Une collection vue par son auteur. Les champs de `ResumeMaCollection`, plus toutes les pages.
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        est_publique:
+          type: boolean
+        masquee:
+          type: boolean
+        nombre_pages:
+          type: integer
+          minimum: 0
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+        maj_le:
+          $ref: '#/components/schemas/DateHeure'
+        pages:
+          type: array
+          description: Toutes les pages, par position croissante (1, 2, 3… sans trou).
+          items:
+            type: object
+            additionalProperties: false
+            required: [position, bibliotheque, adresse, masquee, a_convertir]
+            properties:
+              position:
+                type: integer
+                minimum: 1
+              bibliotheque:
+                $ref: '#/components/schemas/IdentifiantBibliotheque'
+              adresse:
+                $ref: '#/components/schemas/AdressePage'
+              masquee:
+                type: boolean
+                description: Vrai si la page contient un texte banni appliqué ; le public ne la voit pas.
+              a_convertir:
+                type: boolean
+
+    DemandeCollection:
+      type: object
+      required: [nom]
+      properties:
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        est_publique:
+          type: boolean
+          default: false
+
+    ModificationCollection:
+      type: object
+      minProperties: 1
+      properties:
+        nom:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        est_publique:
+          type: boolean
+
+    DemandeAjoutPage:
+      type: object
+      required: [adresse]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          type: string
+          description: L'adresse de page, contrôlée par `valider` (F5).
+        position:
+          type: integer
+          minimum: 1
+          description: Facultative. Au-delà de la dernière position + 1, `ERR_INVALID_PARAMETER`.
+
+    DemandeOrdrePages:
+      type: object
+      required: [pages]
+      properties:
+        pages:
+          type: array
+          description: Toutes les pages de la collection, dans le nouvel ordre.
+          items:
+            $ref: '#/components/schemas/DemandePageDesignee'
+
+    ListeMesCollections:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/ResumeMaCollection'
+
+    # ---------------------------------------------------------------
+    # Porte application : annotations
+    # ---------------------------------------------------------------
+
+    Annotation:
+      type: object
+      additionalProperties: false
+      required: [id, bibliotheque, adresse, contenu, est_publique, masquee, a_convertir, auteur, est_a_moi, cree_le, maj_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          $ref: '#/components/schemas/AdressePage'
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        est_publique:
+          type: boolean
+        masquee:
+          type: boolean
+          description: |
+            Vrai si un administrateur l'a masquée (A4) ou si la page contient un texte banni
+            appliqué. Seul l'auteur voit une annotation masquée.
+        a_convertir:
+          type: boolean
+        auteur:
+          $ref: '#/components/schemas/AuteurPublic'
+        est_a_moi:
+          type: boolean
+          description: Vrai si le membre connecté en est l'auteur (il peut la modifier).
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+        maj_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    DemandeAnnotation:
+      type: object
+      required: [adresse, contenu, est_publique]
+      properties:
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+        adresse:
+          type: string
+          description: L'adresse de page, contrôlée par `valider` (F5).
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        est_publique:
+          type: boolean
+
+    ModificationAnnotation:
+      type: object
+      minProperties: 1
+      properties:
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        est_publique:
+          type: boolean
+
+    ListeAnnotations:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/Annotation'
+
+    # ---------------------------------------------------------------
+    # Porte application : signalements
+    # ---------------------------------------------------------------
+
+    CibleSignalement:
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [annotation, collection, lien_court]
+        id:
+          type: string
+          description: L'identifiant de l'annotation ou de la collection, ou le slug du lien court.
+
+    DemandeSignalement:
+      type: object
+      required: [cible, motif]
+      properties:
+        cible:
+          $ref: '#/components/schemas/CibleSignalement'
+        motif:
+          type: string
+          minLength: 1
+          maxLength: 500
+
+    Signalement:
+      type: object
+      additionalProperties: false
+      required: [id, cible, motif, statut, cree_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        cible:
+          $ref: '#/components/schemas/CibleSignalement'
+        motif:
+          type: string
+        statut:
+          type: string
+          enum: [en_attente, traite, rejete]
+          description: |
+            `en_attente` tant qu'un administrateur ne l'a pas vu ; `traite` quand il a masqué
+            ou rétabli le contenu ; `rejete` quand il a rejeté le signalement (A4).
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    ListeSignalements:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/Signalement'
+
+    # ---------------------------------------------------------------
+    # Porte application : historique, import
+    # ---------------------------------------------------------------
+
+    RechercheEnregistree:
+      type: object
+      additionalProperties: false
+      required: [id, texte, mode, portee, cree_le]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        texte:
+          type: string
+          minLength: 1
+          maxLength: 3200
+          description: Le texte normalisé, tel qu'il a été cherché.
+        mode:
+          $ref: '#/components/schemas/Mode'
+        portee:
+          type: string
+          enum: [locale, reseau]
+        cree_le:
+          $ref: '#/components/schemas/DateHeure'
+
+    ListeRecherches:
+      type: object
+      additionalProperties: false
+      required: [lot, taille, total, elements]
+      properties:
+        lot:
+          type: integer
+          minimum: 1
+        taille:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        elements:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/RechercheEnregistree'
+
+    ResultatImport:
+      type: object
+      additionalProperties: false
+      required: [importes, fusionnes, a_convertir]
+      properties:
+        importes:
+          type: object
+          additionalProperties: false
+          required: [marque_pages, collections, annotations]
+          properties:
+            marque_pages:
+              type: integer
+              minimum: 0
+            collections:
+              type: integer
+              minimum: 0
+            annotations:
+              type: integer
+              minimum: 0
+        fusionnes:
+          type: integer
+          minimum: 0
+          description: Les marque-pages déjà présents, fusionnés au lieu d'être recréés (règle 20).
+        a_convertir:
+          type: integer
+          minimum: 0
+          description: Les adresses qui désignent une autre bibliothèque et seront converties en tâche de fond.
+
+    EtatImport:
+      type: object
+      additionalProperties: false
+      required: [a_convertir, derniere_tentative_le]
+      properties:
+        a_convertir:
+          type: integer
+          minimum: 0
+          description: Les adresses importées qui désignent encore leur ancienne bibliothèque.
+        derniere_tentative_le:
+          $ref: '#/components/schemas/DateHeureOuNull'
+
+    # ---------------------------------------------------------------
+    # Erreurs
+    # ---------------------------------------------------------------
+
+    CodeErreur:
+      type: string
+      description: |
+        Les codes d'erreur communs. Les sept premiers viennent du moteur ; les suivants
+        complètent le livrable 2 dans le même style.
+
+        | Code | Statut | Quand |
+        | --- | --- | --- |
+        | `ERR_INVALID_ADDRESS_SYNTAX` | 422 | adresse mal écrite (moteur, F5) |
+        | `ERR_INVALID_HEX_CHARS` | 422 | hexagone avec un caractère interdit (moteur, F5) |
+        | `ERR_OUT_OF_BOUNDS` | 404 si seul, sinon 422 | page inexistante (moteur, F5) |
+        | `ERR_EMPTY_QUERY` | 422 | texte vide après normalisation (moteur) |
+        | `ERR_TEXT_TOO_LONG` | 422 | texte de plus de 3 200 caractères (moteur) |
+        | `ERR_UNKNOWN_MODE` | 422 | mode inconnu (moteur) |
+        | `ERR_INVALID_PAGE_LENGTH` | 422 | mode `page` et texte qui ne fait pas 3 200 caractères (moteur) |
+        | `ERR_INVALID_PARAMETER` | 422 | paramètre ou champ absent, mal écrit ou hors limites |
+        | `ERR_NOT_FOUND` | 404 | ressource inconnue, privée, masquée ou d'un autre membre |
+        | `ERR_UNKNOWN_LIBRARY` | 404 | bibliothèque absente de l'annuaire |
+        | `ERR_SHORT_LINK_EXPIRED` | 410 | lien court expiré |
+        | `ERR_UNAUTHENTICATED` | 401 | jeton de session absent ou invalide |
+        | `ERR_INVALID_CREDENTIALS` | 401 | email ou mot de passe incorrect |
+        | `ERR_INVALID_NETWORK_TOKEN` | 401 | jeton réseau absent ou faux |
+        | `ERR_ACCOUNT_SUSPENDED` | 403 | compte suspendu (A2) |
+        | `ERR_REGISTRATION_CLOSED` | 403 | inscriptions fermées (A8) |
+        | `ERR_ALREADY_EXISTS` | 409 | doublon (email, marque-page, identifiant de recherche) |
+        | `ERR_INVALID_IMPORT` | 422 | fichier d'import hors contrat (M12) |
+        | `ERR_TOO_MANY_REQUESTS` | 429 | quota dépassé (A10) |
+        | `ERR_PEER_UNREACHABLE` | 502 | pair éteint, trop lent ou hors contrat |
+        | `ERR_PEER_BUSY` | 503 | pair qui a répondu `429` |
+
+        Deux codes du livrable 2 ne sortent jamais en HTTP : `ERR_INVALID_ALPHABET` (le
+        serveur normalise avant le moteur : s'il sort, c'est un oubli) et
+        `ERR_LIBRARY_LIMIT` (calculé dans l'application web par `voisine`, qui désactive
+        le bouton).
+      enum:
+        - ERR_INVALID_ADDRESS_SYNTAX
+        - ERR_INVALID_HEX_CHARS
+        - ERR_OUT_OF_BOUNDS
+        - ERR_EMPTY_QUERY
+        - ERR_TEXT_TOO_LONG
+        - ERR_UNKNOWN_MODE
+        - ERR_INVALID_PAGE_LENGTH
+        - ERR_INVALID_PARAMETER
+        - ERR_NOT_FOUND
+        - ERR_UNKNOWN_LIBRARY
+        - ERR_SHORT_LINK_EXPIRED
+        - ERR_UNAUTHENTICATED
+        - ERR_INVALID_CREDENTIALS
+        - ERR_INVALID_NETWORK_TOKEN
+        - ERR_ACCOUNT_SUSPENDED
+        - ERR_REGISTRATION_CLOSED
+        - ERR_ALREADY_EXISTS
+        - ERR_INVALID_IMPORT
+        - ERR_TOO_MANY_REQUESTS
+        - ERR_PEER_UNREACHABLE
+        - ERR_PEER_BUSY
+
+    Erreur:
+      type: object
+      additionalProperties: false
+      required: [code, champ, message]
+      properties:
+        code:
+          $ref: '#/components/schemas/CodeErreur'
+        champ:
+          type: [string, 'null']
+          description: |
+            Le champ concerné : `adresse`, `hexagone`, `mur`, `etagere`, `volume`, `page`,
+            `texte`, `mode`, `bibliotheque`, `id`, `lot`, `taille`, `email`… ou `null`
+            quand l'erreur ne porte sur aucun champ.
+        message:
+          type: string
+          minLength: 1
+          description: Une phrase lisible, en français. Libre, non comparée par le testeur.
+
+    ReponseErreur:
+      type: object
+      additionalProperties: false
+      required: [erreurs]
+      properties:
+        erreurs:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Erreur'
+
+    # ---------------------------------------------------------------
+    # Fichier d'export
+    # ---------------------------------------------------------------
+
+    ExportCompte:
+      type: object
+      additionalProperties: false
+      description: |
+        **Le fichier d'export d'un compte** (M11), lu par l'import d'une autre bibliothèque
+        (M12). Son format fait partie du contrat commun.
+
+        - Chaque adresse est accompagnée de l'identifiant de sa bibliothèque.
+        - Le mot de passe n'y figure pas, même haché.
+        - L'import ne recrée que les marque-pages, les collections et les annotations,
+          qui arrivent privées. Le reste est informatif.
+        - Un fichier qui ne respecte pas ce schéma est refusé en entier (`ERR_INVALID_IMPORT`).
+      required: [format, exporte_le, bibliotheque, profil, marque_pages, collections, annotations, votes, recherches, liens_courts]
+      properties:
+        format:
+          type: string
+          const: babel-export/v1
+        exporte_le:
+          $ref: '#/components/schemas/DateHeure'
+        bibliotheque:
+          $ref: '#/components/schemas/IdentifiantBibliotheque'
+          description: La bibliothèque qui a produit le fichier.
+        profil:
+          type: object
+          additionalProperties: false
+          required: [pseudo, email, cree_le]
+          properties:
+            pseudo:
+              type: string
+              minLength: 1
+            email:
+              type: string
+              format: email
+            cree_le:
+              $ref: '#/components/schemas/DateHeure'
+        marque_pages:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [bibliotheque, adresse, titre, cree_le]
+            properties:
+              bibliotheque:
+                $ref: '#/components/schemas/IdentifiantBibliotheque'
+              adresse:
+                $ref: '#/components/schemas/AdressePage'
+              titre:
+                type: [string, 'null']
+              cree_le:
+                $ref: '#/components/schemas/DateHeure'
+        collections:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [nom, description, est_publique, pages, cree_le]
+            properties:
+              nom:
+                type: string
+                minLength: 1
+              description:
+                type: string
+              est_publique:
+                type: boolean
+                description: L'état chez l'ancienne bibliothèque. À l'import, la collection arrive privée.
+              pages:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [position, bibliotheque, adresse]
+                  properties:
+                    position:
+                      type: integer
+                      minimum: 1
+                    bibliotheque:
+                      $ref: '#/components/schemas/IdentifiantBibliotheque'
+                    adresse:
+                      $ref: '#/components/schemas/AdressePage'
+              cree_le:
+                $ref: '#/components/schemas/DateHeure'
+        annotations:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [bibliotheque, adresse, contenu, est_publique, cree_le, maj_le]
+            properties:
+              bibliotheque:
+                $ref: '#/components/schemas/IdentifiantBibliotheque'
+              adresse:
+                $ref: '#/components/schemas/AdressePage'
+              contenu:
+                type: string
+                minLength: 1
+                maxLength: 2000
+              est_publique:
+                type: boolean
+              cree_le:
+                $ref: '#/components/schemas/DateHeure'
+              maj_le:
+                $ref: '#/components/schemas/DateHeure'
+        votes:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [bibliotheque, adresse, valeur, cree_le]
+            properties:
+              bibliotheque:
+                $ref: '#/components/schemas/IdentifiantBibliotheque'
+              adresse:
+                $ref: '#/components/schemas/AdressePage'
+              valeur:
+                type: integer
+                enum: [1, -1]
+              cree_le:
+                $ref: '#/components/schemas/DateHeure'
+        recherches:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [texte, mode, portee, cree_le]
+            properties:
+              texte:
+                type: string
+              mode:
+                $ref: '#/components/schemas/Mode'
+              portee:
+                type: string
+                enum: [locale, reseau]
+              cree_le:
+                $ref: '#/components/schemas/DateHeure'
+        liens_courts:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [slug, cible, passage, visites, expire_le, cree_le]
+            properties:
+              slug:
+                type: string
+              cible:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required: [type, bibliotheque, adresse]
+                    properties:
+                      type:
+                        const: adresse
+                      bibliotheque:
+                        $ref: '#/components/schemas/IdentifiantBibliotheque'
+                      adresse:
+                        $ref: '#/components/schemas/AdresseCible'
+                  - type: object
+                    additionalProperties: false
+                    required: [type, collection]
+                    properties:
+                      type:
+                        const: collection
+                      collection:
+                        type: integer
+                        minimum: 0
+                        description: L'indice de la collection dans le tableau `collections` de ce fichier, à partir de 0.
+              passage:
+                type: [string, 'null']
+                description: Le texte à surligner, seulement pour une cible page.
+              visites:
+                type: integer
+                minimum: 0
+              expire_le:
+                $ref: '#/components/schemas/DateHeureOuNull'
+              cree_le:
+                $ref: '#/components/schemas/DateHeure'
