@@ -58,7 +58,8 @@ Route::middleware('auth.optionnelle')->group(function (): void {
     Route::get('bibliotheques/{identifiant}/collections', [BibliothequeController::class, 'collections']);       // V13, V21
     Route::get('bibliotheques/{identifiant}/collections/{id}', [BibliothequeController::class, 'collection']);   // V13, V21
     Route::get('bibliotheques/{identifiant}/pages-populaires', [BibliothequeController::class, 'pagesPopulaires']); // V13, V21
-    Route::post('recherches-reseau', [RechercheReseauController::class, 'lancer']);           // V15
+    Route::post('recherches-reseau', [RechercheReseauController::class, 'lancer'])             // V15
+        ->middleware('throttle:recherche-reseau'); // chaque lancement interroge tous les pairs : quota plus serré
     Route::get('recherches-reseau/{identifiant}', [RechercheReseauController::class, 'etat']); // V15
 });
 

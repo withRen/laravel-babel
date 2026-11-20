@@ -271,14 +271,15 @@ it('la tâche de fond marque une page enregistrée qui contient un texte appliqu
 it('enregistre le nom, la description, les inscriptions et les quotas (A8, A10)', function () {
     livewire(Reglages::class)
         ->fillForm(['nom' => 'Babel Béziers', 'description' => 'Notre bibliothèque', 'inscriptions_ouvertes' => false,
-            'quota_api_publique' => 90, 'quota_lecture' => 200, 'quota_publication' => 5])
+            'quota_api_publique' => 90, 'quota_lecture' => 200, 'quota_publication' => 5, 'quota_recherche_reseau' => 3])
         ->call('save')->assertHasNoFormErrors();
 
     expect(Bibliotheque::locale()->nom)->toBe('Babel Béziers')
         ->and(Reglage::inscriptionsOuvertes())->toBeFalse()
         ->and(Reglage::quota('quota_api_publique'))->toBe(90)
         ->and(Reglage::quota('quota_lecture'))->toBe(200)
-        ->and(Reglage::quota('quota_publication'))->toBe(5);
+        ->and(Reglage::quota('quota_publication'))->toBe(5)
+        ->and(Reglage::quota('quota_recherche_reseau'))->toBe(3);
 
     $this->postJson('/api/v1/app/auth/inscription', ['pseudo' => 'nouveau', 'email' => 'n@x.fr', 'mot_de_passe' => 'unmotdepasse123'])
         ->assertForbidden();
@@ -291,7 +292,7 @@ it('refuse un quota réseau sous le plancher du contrat (60)', function () {
 
 it('lit les quotas en base avec des valeurs par défaut sûres (A10)', function () {
     expect(Reglage::quota('quota_api_publique'))->toBe(60)->and(Reglage::quota('quota_lecture'))->toBe(120)
-        ->and(Reglage::quota('quota_publication'))->toBe(20);
+        ->and(Reglage::quota('quota_publication'))->toBe(20)->and(Reglage::quota('quota_recherche_reseau'))->toBe(10);
 
     foreach (['abc', '0', '-5', ''] as $mauvais) {
         Reglage::definir('quota_lecture', $mauvais);

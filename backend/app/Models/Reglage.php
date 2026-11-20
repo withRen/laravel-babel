@@ -37,6 +37,7 @@ class Reglage extends Model
         'quota_api_publique' => 60,  // porte réseau /api/v1 : le contrat exige d'accepter au moins 60
         'quota_lecture' => 120,      // porte application : lectures
         'quota_publication' => 20,   // porte application : publications
+        'quota_recherche_reseau' => 10, // porte application : lancer une recherche sur tout le réseau
     ];
 
     /** Plancher du contrat : la porte réseau doit accepter AU MOINS 60 requêtes par minute et par IP. */
