@@ -13,10 +13,33 @@
 */
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\HasardController;
+use App\Http\Controllers\Api\LienCourtController;
 use App\Http\Controllers\Api\MoiController;
+use App\Http\Controllers\Api\PageAppController;
+use App\Http\Controllers\Api\RechercheAppController;
+use App\Http\Controllers\Api\SignalementController;
 use Illuminate\Support\Facades\Route;
 
 // Les autres routes métier arrivent avec les branches lecture-annotee, etc.
+
+// Routes « visiteur ou membre » (V) : ouvertes à tous ; si l'application envoie un jeton valide, le membre est
+// reconnu (vote, marque-page, annotations privées), sinon (ou jeton faux, ou compte suspendu) c'est un visiteur.
+Route::middleware('auth.optionnelle')->group(function (): void {
+    // Lecture : /hasard AVANT /pages/{adresse}, comme le demande l'en-tête de ce fichier.
+    Route::middleware('throttle:lecture')->group(function (): void {
+        Route::get('hasard', HasardController::class);                       // V9
+        Route::get('pages/{adresse}', PageAppController::class);             // V1, V15, V16
+        Route::post('recherches', RechercheAppController::class);            // V4, V5, V6
+        Route::get('liens-courts/{slug}', [LienCourtController::class, 'show']); // V12
+    });
+
+    // Publier (lien court, signalement) : quota plus serré, un visiteur peut le faire sans compte.
+    Route::middleware('throttle:publication')->group(function (): void {
+        Route::post('liens-courts', [LienCourtController::class, 'store']);  // V11
+        Route::post('signalements', [SignalementController::class, 'store']); // V17
+    });
+});
 
 // Comptes (V19, M1) : sans jeton. Throttlées : ce sont les deux portes qu'un pirate martèlerait.
 Route::prefix('auth')->group(function (): void {
@@ -36,5 +59,8 @@ Route::middleware(['auth:sanctum', 'compte.actif'])->group(function (): void {
         Route::get('/', [MoiController::class, 'show']);       // M1
         Route::patch('/', [MoiController::class, 'update']);   // M9
         Route::delete('/', [MoiController::class, 'destroy']); // M10
+
+        Route::get('liens-courts', [LienCourtController::class, 'index']);            // V11 (les miens)
+        Route::delete('liens-courts/{slug}', [LienCourtController::class, 'destroy']); // V11
     });
 });

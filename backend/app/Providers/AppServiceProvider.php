@@ -62,7 +62,20 @@ class AppServiceProvider extends ServiceProvider
         // Inscription : 10 créations par minute et par IP (anti-bots).
         RateLimiter::for('inscription', fn (Request $request) => Limit::perMinute(10)->by($request->ip()));
 
-        // Quota de la porte réseau (A10) : lu dans les réglages, modifiable par l'administrateur sans redéployer.
+        // Quotas lus dans les réglages, modifiables par l'administrateur sans redéployer.
         RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_api_publique'))->by($request->ip()));
+
+        // Porte application, lecture (pages, recherche, hasard, ouverture d'un lien) : 120 par minute par défaut. Un membre
+        // est compté par son compte (deux membres derrière la même box ne se gênent pas), un visiteur par son IP.
+        RateLimiter::for('lecture', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_lecture'))->by(self::cleDeQuota($request)));
+
+        // Publier (créer un lien court, signaler) : 20 par minute par défaut, ouvert aux visiteurs donc plus serré (anti-spam).
+        RateLimiter::for('publication', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_publication'))->by(self::cleDeQuota($request)));
+    }
+
+    /** Un membre reconnu compte par son identifiant, un visiteur par son adresse IP. */
+    private static function cleDeQuota(Request $request): string
+    {
+        return $request->user() !== null ? 'membre:'.$request->user()->getAuthIdentifier() : 'ip:'.$request->ip();
     }
 }
