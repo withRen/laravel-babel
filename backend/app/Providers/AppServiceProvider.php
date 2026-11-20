@@ -2,12 +2,14 @@
 
 namespace App\Providers;
 
+use App\Models\Reglage;
 use App\Models\User;
 use App\Services\Annuaire\Annuaire;
 use App\Services\Annuaire\AnnuaireHttp;
 use App\Services\Engine\Bibliotheque;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Facades\Gate;
@@ -41,6 +43,15 @@ class AppServiceProvider extends ServiceProvider
 
         Model::preventLazyLoading(! $this->app->isProduction());
 
+        // Derrière ngrok, tous les pairs arrivent de l'adresse du proxy : sans cela, $request->ip() vaudrait la même
+        // adresse pour tous et les 60 requêtes/minute (A10) seraient PARTAGÉES entre les 9 pairs. On croit donc
+        // X-Forwarded-For, mais seulement quand la connexion vient d'un proxy de confiance (config babel.trusted_proxies,
+        // la boucle locale par défaut : l'agent ngrok tourne sur la même machine). Un client direct qui écrit lui-même
+        // X-Forwarded-For n'est pas cru. Symfony lit la liste par la droite et saute les proxies de confiance : la
+        // dernière adresse ajoutée par NOTRE proxy compte, pas celle qu'un client a pu inscrire au début.
+        $proxies = config('babel.trusted_proxies', []);
+        TrustProxies::at(in_array('*', $proxies, true) ? '*' : $proxies);
+
         // Limite de débit de la porte réseau (A10) : le contrat exige d'accepter AU MOINS
         // 60 requêtes par minute et par adresse IP appelante. Au-delà, le rendu 429 du
         // contrat (ERR_TOO_MANY_REQUESTS + Retry-After) est produit par RenduErreursApi.
@@ -61,14 +72,15 @@ class AppServiceProvider extends ServiceProvider
         // Inscription : 10 créations par minute et par IP (anti-bots).
         RateLimiter::for('inscription', fn (Request $request) => Limit::perMinute(10)->by($request->ip()));
 
-        RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(60)->by($request->ip()));
+        // Quotas lus dans les réglages, modifiables par l'administrateur sans redéployer.
+        RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_api_publique'))->by($request->ip()));
 
-        // Porte application, lecture (pages, recherche, hasard, ouverture d'un lien) : 120 par minute. Un membre est
-        // compté par son compte (deux membres derrière la même box ne se gênent pas), un visiteur par son IP.
-        RateLimiter::for('lecture', fn (Request $request) => Limit::perMinute(120)->by(self::cleDeQuota($request)));
+        // Porte application, lecture (pages, recherche, hasard, ouverture d'un lien) : 120 par minute par défaut. Un membre
+        // est compté par son compte (deux membres derrière la même box ne se gênent pas), un visiteur par son IP.
+        RateLimiter::for('lecture', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_lecture'))->by(self::cleDeQuota($request)));
 
-        // Publier (créer un lien court, signaler) : 20 par minute, ouvert aux visiteurs donc plus serré (anti-spam).
-        RateLimiter::for('publication', fn (Request $request) => Limit::perMinute(20)->by(self::cleDeQuota($request)));
+        // Publier (créer un lien court, signaler) : 20 par minute par défaut, ouvert aux visiteurs donc plus serré (anti-spam).
+        RateLimiter::for('publication', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_publication'))->by(self::cleDeQuota($request)));
     }
 
     /** Un membre reconnu compte par son identifiant, un visiteur par son adresse IP. */

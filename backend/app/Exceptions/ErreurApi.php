@@ -68,6 +68,28 @@ class ErreurApi extends RuntimeException
         return self::une(401, 'ERR_INVALID_NETWORK_TOKEN', 'Le jeton réseau est absent ou invalide.');
     }
 
+    /** L'identifiant donné dans l'URL n'est pas celui d'une bibliothèque que notre serveur connaît. */
+    public static function bibliothequeInconnue(): self
+    {
+        return self::une(404, 'ERR_UNKNOWN_LIBRARY', 'Cette bibliothèque ne fait pas partie du réseau.', 'identifiant');
+    }
+
+    /** Le pair est éteint, trop lent (plus de 2 secondes) ou a répondu hors contrat. */
+    public static function pairInjoignable(string $identifiant): self
+    {
+        return self::une(502, 'ERR_PEER_UNREACHABLE', "La bibliothèque {$identifiant} ne répond pas.", 'bibliotheque');
+    }
+
+    /** Le pair a répondu 429 : il est occupé, pas en panne. `Retry-After` reprend sa valeur, si elle existe. */
+    public static function pairOccupe(string $identifiant, ?int $secondes = null): self
+    {
+        return new self(
+            503,
+            [['code' => 'ERR_PEER_BUSY', 'champ' => 'bibliotheque', 'message' => "La bibliothèque {$identifiant} est occupée, réessayez plus tard."]],
+            $secondes === null ? [] : ['Retry-After' => (string) $secondes],
+        );
+    }
+
     public static function trop(int $secondes): self
     {
         return new self(

@@ -17,12 +17,15 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DonneesController;
 use App\Http\Controllers\Api\HasardController;
 use App\Http\Controllers\Api\HistoriqueController;
+use App\Http\Controllers\Api\BibliothequeController;
+use App\Http\Controllers\Api\InfosController;
 use App\Http\Controllers\Api\LienCourtController;
 use App\Http\Controllers\Api\MaCollectionController;
 use App\Http\Controllers\Api\MarquePageController;
 use App\Http\Controllers\Api\MoiController;
 use App\Http\Controllers\Api\PageAppController;
 use App\Http\Controllers\Api\RechercheAppController;
+use App\Http\Controllers\Api\RechercheReseauController;
 use App\Http\Controllers\Api\SignalementController;
 use App\Http\Controllers\Api\VoteController;
 use Illuminate\Support\Facades\Route;
@@ -45,6 +48,18 @@ Route::middleware('auth.optionnelle')->group(function (): void {
         Route::post('liens-courts', [LienCourtController::class, 'store']);  // V11
         Route::post('signalements', [SignalementController::class, 'store']); // V17
     });
+});
+
+// Bibliothèque et réseau (V15, V16, V20, V21, M13) : ouvertes aux visiteurs ; un membre reconnu à son jeton est
+// seulement noté (historique de ses recherches). Un jeton faux est traité comme un visiteur.
+Route::middleware('auth.optionnelle')->group(function (): void {
+    Route::get('infos', InfosController::class);                                              // V19, V20, A8
+    Route::get('bibliotheques', [BibliothequeController::class, 'index']);                    // V15, V21, M13
+    Route::get('bibliotheques/{identifiant}/collections', [BibliothequeController::class, 'collections']);       // V13, V21
+    Route::get('bibliotheques/{identifiant}/collections/{id}', [BibliothequeController::class, 'collection']);   // V13, V21
+    Route::get('bibliotheques/{identifiant}/pages-populaires', [BibliothequeController::class, 'pagesPopulaires']); // V13, V21
+    Route::post('recherches-reseau', [RechercheReseauController::class, 'lancer']);           // V15
+    Route::get('recherches-reseau/{identifiant}', [RechercheReseauController::class, 'etat']); // V15
 });
 
 // Comptes (V19, M1) : sans jeton. Throttlées : ce sont les deux portes qu'un pirate martèlerait.
