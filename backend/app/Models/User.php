@@ -4,7 +4,9 @@ namespace App\Models;
 
 use App\Enums\Role;
 use Database\Factories\UserFactory;
+use Filament\Models\Contracts\FilamentUser;
 use Filament\Models\Contracts\HasName;
+use Filament\Panel;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -12,6 +14,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Gate;
 use Laravel\Sanctum\HasApiTokens;
 
 /**
@@ -20,7 +23,7 @@ use Laravel\Sanctum\HasApiTokens;
  */
 #[Fillable(['pseudo', 'email', 'password', 'role'])]
 #[Hidden(['password', 'remember_token'])]
-class User extends Authenticatable implements HasName
+class User extends Authenticatable implements FilamentUser, HasName
 {
     /** @use HasFactory<UserFactory> */
     use HasApiTokens, HasFactory, Notifiable;
@@ -45,6 +48,16 @@ class User extends Authenticatable implements HasName
         return $this->pseudo;
     }
 
+    /**
+     * Le back-office n'est ouvert qu'à ceux que la Gate « administrer » laisse passer
+     * (AppServiceProvider) : la règle « qui est admin » n'est écrite qu'à un seul endroit.
+     */
+    public function canAccessPanel(Panel $panel): bool
+    {
+        return Gate::forUser($this)->allows('administrer');
+    }
+
+    /** Le rôle seul. Pour savoir si l'on PEUT administrer (compte actif), passer par la Gate. */
     public function estAdmin(): bool
     {
         return $this->role === Role::Admin;

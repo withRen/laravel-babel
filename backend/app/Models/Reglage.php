@@ -18,4 +18,16 @@ class Reglage extends Model
     protected $primaryKey = 'cle';
 
     protected $keyType = 'string';
+
+    /** La valeur d'un réglage, ou $defaut s'il n'existe pas (base pas encore amorcée). */
+    public static function valeur(string $cle, ?string $defaut = null): ?string
+    {
+        return static::query()->whereKey($cle)->value('valeur') ?? $defaut;
+    }
+
+    /** A8 : l'administrateur peut fermer les inscriptions. Ouvertes par défaut. */
+    public static function inscriptionsOuvertes(): bool
+    {
+        return static::valeur('inscriptions_ouvertes', '1') === '1';
+    }
 }
