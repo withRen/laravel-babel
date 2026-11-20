@@ -2,12 +2,13 @@
 
 namespace App\Providers;
 
+use App\Models\User;
 use App\Services\Annuaire\Annuaire;
 use App\Services\Annuaire\AnnuaireHttp;
-use App\Models\User;
 use App\Services\Engine\Bibliotheque;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Facades\Gate;
@@ -40,6 +41,15 @@ class AppServiceProvider extends ServiceProvider
         JsonResource::withoutWrapping();
 
         Model::preventLazyLoading(! $this->app->isProduction());
+
+        // Derrière ngrok, tous les pairs arrivent de l'adresse du proxy : sans cela, $request->ip() vaudrait la même
+        // adresse pour tous et les 60 requêtes/minute (A10) seraient PARTAGÉES entre les 9 pairs. On croit donc
+        // X-Forwarded-For, mais seulement quand la connexion vient d'un proxy de confiance (config babel.trusted_proxies,
+        // la boucle locale par défaut : l'agent ngrok tourne sur la même machine). Un client direct qui écrit lui-même
+        // X-Forwarded-For n'est pas cru. Symfony lit la liste par la droite et saute les proxies de confiance : la
+        // dernière adresse ajoutée par NOTRE proxy compte, pas celle qu'un client a pu inscrire au début.
+        $proxies = config('babel.trusted_proxies', []);
+        TrustProxies::at(in_array('*', $proxies, true) ? '*' : $proxies);
 
         // Limite de débit de la porte réseau (A10) : le contrat exige d'accepter AU MOINS
         // 60 requêtes par minute et par adresse IP appelante. Au-delà, le rendu 429 du
