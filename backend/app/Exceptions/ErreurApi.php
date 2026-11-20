@@ -41,6 +41,28 @@ class ErreurApi extends RuntimeException
         return self::une(401, 'ERR_UNAUTHENTICATED', $message);
     }
 
+    /** Email inconnu OU mot de passe faux : une seule réponse, pour ne pas révéler quels emails existent. */
+    public static function identifiantsInvalides(): self
+    {
+        return self::une(401, 'ERR_INVALID_CREDENTIALS', 'Email ou mot de passe incorrect.');
+    }
+
+    public static function compteSuspendu(): self
+    {
+        return self::une(403, 'ERR_ACCOUNT_SUSPENDED', 'Ce compte est suspendu.');
+    }
+
+    public static function inscriptionsFermees(): self
+    {
+        return self::une(403, 'ERR_REGISTRATION_CLOSED', 'Les inscriptions sont fermées.');
+    }
+
+    /** Doublon : « champ » dit sur quoi il porte (email, pseudo…). */
+    public static function dejaExistant(string $champ, string $message): self
+    {
+        return self::une(409, 'ERR_ALREADY_EXISTS', $message, $champ);
+    }
+
     public static function jetonReseauInvalide(): self
     {
         return self::une(401, 'ERR_INVALID_NETWORK_TOKEN', 'Le jeton réseau est absent ou invalide.');
