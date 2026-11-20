@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Models\User;
+use App\Services\Annuaire\Annuaire;
+use App\Services\Annuaire\AnnuaireHttp;
 use App\Services\Engine\Bibliotheque;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
@@ -22,6 +24,9 @@ class AppServiceProvider extends ServiceProvider
         // Les dimensions de la bibliothèque (N = 29^3200 pages) : un calcul GMP fait une seule fois par
         // processus, puis partagé par le validateur et le tirage au hasard.
         $this->app->singleton(Bibliotheque::class);
+
+        // L'annuaire est derrière une interface : son format exact n'est pas encore connu (voir AnnuaireHttp).
+        $this->app->bind(Annuaire::class, AnnuaireHttp::class);
     }
 
     /**
