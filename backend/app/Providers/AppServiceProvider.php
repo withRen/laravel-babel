@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Models\User;
+use App\Services\Annuaire\Annuaire;
+use App\Services\Annuaire\AnnuaireHttp;
 use App\Services\Engine\Bibliotheque;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
@@ -22,6 +24,9 @@ class AppServiceProvider extends ServiceProvider
         // Les dimensions de la bibliothèque (N = 29^3200 pages) : un calcul GMP fait une seule fois par
         // processus, puis partagé par le validateur et le tirage au hasard.
         $this->app->singleton(Bibliotheque::class);
+
+        // L'annuaire est derrière une interface : son format exact n'est pas encore connu (voir AnnuaireHttp).
+        $this->app->bind(Annuaire::class, AnnuaireHttp::class);
     }
 
     /**
@@ -57,5 +62,18 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('inscription', fn (Request $request) => Limit::perMinute(10)->by($request->ip()));
 
         RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(60)->by($request->ip()));
+
+        // Porte application, lecture (pages, recherche, hasard, ouverture d'un lien) : 120 par minute. Un membre est
+        // compté par son compte (deux membres derrière la même box ne se gênent pas), un visiteur par son IP.
+        RateLimiter::for('lecture', fn (Request $request) => Limit::perMinute(120)->by(self::cleDeQuota($request)));
+
+        // Publier (créer un lien court, signaler) : 20 par minute, ouvert aux visiteurs donc plus serré (anti-spam).
+        RateLimiter::for('publication', fn (Request $request) => Limit::perMinute(20)->by(self::cleDeQuota($request)));
+    }
+
+    /** Un membre reconnu compte par son identifiant, un visiteur par son adresse IP. */
+    private static function cleDeQuota(Request $request): string
+    {
+        return $request->user() !== null ? 'membre:'.$request->user()->getAuthIdentifier() : 'ip:'.$request->ip();
     }
 }

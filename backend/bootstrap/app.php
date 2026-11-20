@@ -36,7 +36,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // « adresses.* » : une adresse ne se corrige pas, pas même d'un espace (POST /lectures).
         // « adresse » (une page désignée par un membre : marque-page, vote, collection, annotation) et « livre »
         // (filtre de liste) : comme « adresses.* », une adresse n'est jamais arrangée, pas même d'un espace.
-        $middleware->trimStrings(except: ['texte', 'passage', 'mot_de_passe', 'mot_de_passe_actuel', 'adresses.*', 'adresse', 'pages.*.adresse', 'livre']);
+        $middleware->trimStrings(except: ['texte', 'passage', 'mot_de_passe', 'mot_de_passe_actuel', 'adresses.*', 'adresse', 'pages.*.adresse', 'livre', 'cible.adresse']);
 
         // POST /lectures : une adresse vide « "" » doit rester une chaîne vide (une adresse refusée), pas devenir
         // null, qui serait indiscernable d'un élément absent.

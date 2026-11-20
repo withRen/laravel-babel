@@ -1,8 +1,76 @@
-.DS_Store
-.idea/
-.vscode/
-*.log
-# Secrets : jamais dans le dépôt
+# ── Secrets : jamais dans le dépôt ──────────────────────────
 .env
 .env.*
 !.env.example
+auth.json
+*.pem
+*.key
+# La clé du moteur (BABEL_KEY) vit dans .env, à sauvegarder à part.
+
+# ── Système ─────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
+
+# ── Éditeurs et IDE ─────────────────────────────────────────
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.nova/
+.zed/
+.cursor/
+.codex/
+*.swp
+*.swo
+
+# ── Journaux et temporaires ─────────────────────────────────
+*.log
+npm-debug.log*
+yarn-error.log*
+*.tmp
+*.bak
+
+# ── Dépendances ─────────────────────────────────────────────
+node_modules/
+vendor/
+
+# ── Bases de données locales ────────────────────────────────
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+
+# ── Tests et couverture ─────────────────────────────────────
+.phpunit.cache/
+.phpunit.result.cache
+coverage/
+*.lcov
+
+# ── Builds et caches ────────────────────────────────────────
+dist/
+out-tsc/
+.angular/
+.sass-cache/
+backend/public/build/
+backend/public/hot
+backend/public/storage
+backend/public/css/filament/
+backend/public/js/filament/
+backend/public/fonts/filament/
+backend/public/fonts-manifest.dev.json
+backend/bootstrap/cache/*
+!backend/bootstrap/cache/.gitignore
+
+# ── Laravel : outils d'aide locaux ──────────────────────────
+_ide_helper.php
+_ide_helper_models.php
+.phpstorm.meta.php
+Homestead.json
+Homestead.yaml
+.phpactor.json
