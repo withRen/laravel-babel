@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Models\Reglage;
 use App\Models\User;
 use App\Services\Annuaire\Annuaire;
 use App\Services\Annuaire\AnnuaireHttp;
@@ -61,6 +62,7 @@ class AppServiceProvider extends ServiceProvider
         // Inscription : 10 créations par minute et par IP (anti-bots).
         RateLimiter::for('inscription', fn (Request $request) => Limit::perMinute(10)->by($request->ip()));
 
-        RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(60)->by($request->ip()));
+        // Quota de la porte réseau (A10) : lu dans les réglages, modifiable par l'administrateur sans redéployer.
+        RateLimiter::for('reseau', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_api_publique'))->by($request->ip()));
     }
 }
