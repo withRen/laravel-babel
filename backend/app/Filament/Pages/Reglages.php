@@ -47,6 +47,7 @@ class Reglages extends Page
             'quota_api_publique' => Reglage::quota('quota_api_publique'),
             'quota_lecture' => Reglage::quota('quota_lecture'),
             'quota_publication' => Reglage::quota('quota_publication'),
+            'quota_recherche_reseau' => Reglage::quota('quota_recherche_reseau'),
         ]);
     }
 
@@ -67,7 +68,9 @@ class Reglages extends Page
                     ->helperText('Le contrat impose d\'accepter au moins '.Reglage::QUOTA_RESEAU_MINIMUM.' requêtes par minute et par IP.'),
                 TextInput::make('quota_lecture')->label('Application : lectures')->numeric()->integer()->required()->minValue(1)->maxValue(100000),
                 TextInput::make('quota_publication')->label('Application : publications')->numeric()->integer()->required()->minValue(1)->maxValue(100000),
-            ])->columns(3),
+                TextInput::make('quota_recherche_reseau')->label('Application : recherches sur le réseau')->numeric()->integer()->required()->minValue(1)->maxValue(100000)
+                    ->helperText('Chaque recherche interroge tous les pairs : gardez ce quota bas.'),
+            ])->columns(2),
         ]);
     }
 

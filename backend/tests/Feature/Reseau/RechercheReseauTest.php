@@ -6,14 +6,18 @@ use App\Events\RechercheReseauTerminee;
 use App\Jobs\InterrogerPairPourRecherche;
 use App\Models\Bibliotheque;
 use App\Models\Recherche;
+use App\Models\Reglage;
 use App\Models\User;
 use App\Services\Reseau\RechercheReseau;
 use Babel\Moteur\Moteur;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
 
 /*
  * La recherche sur tout le réseau (V15) : POST /app/recherches-reseau et GET /app/recherches-reseau/{identifiant}.
@@ -385,4 +389,57 @@ it('ne garde rien d\'un visiteur, ni d\'un jeton faux, ni d\'une recherche refus
     lancerRechercheReseau($this, ['identifiant' => '3f2c8a1e-6b7d-4c1a-9e2f-0a1b2c3d4e63', 'mode' => 'page', 'texte' => str_repeat('a', 3200)], ['Authorization' => 'Bearer '.$jeton])->assertStatus(202);
 
     expect(Recherche::count())->toBe(0);
+});
+
+/* ---------------------------------------------------------------- limite de débit (A10) */
+
+it('limite le lancement des recherches à 10 par minute, puis répond 429 au format du contrat avec Retry-After', function () {
+    RateLimiter::clear('recherche-reseau');
+
+    for ($i = 0; $i < 10; $i++) {
+        lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()])->assertStatus(202);
+    }
+
+    $r = lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()]);
+    attendErreurContrat($r, 429, 'ERR_TOO_MANY_REQUESTS', null);
+    expect((int) $r->headers->get('Retry-After'))->toBeGreaterThanOrEqual(1)->toBeLessThanOrEqual(60);
+});
+
+it('lit le quota des recherches réseau dans les réglages (modifiable sans redéployer)', function () {
+    Cache::flush();
+    Reglage::definir('quota_recherche_reseau', '2');
+
+    lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()])->assertStatus(202);
+    lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()])->assertStatus(202);
+    attendErreurContrat(lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()]), 429, 'ERR_TOO_MANY_REQUESTS', null);
+});
+
+it('compte chaque membre à part : un membre qui a épuisé son quota ne bloque ni un autre membre ni un visiteur', function () {
+    Cache::flush();
+    Reglage::definir('quota_recherche_reseau', '1');
+    $ada = User::factory()->create();
+    $bob = User::factory()->create();
+
+    $entetesAda = ['Authorization' => 'Bearer '.$ada->createToken('test')->plainTextToken];
+    $entetesBob = ['Authorization' => 'Bearer '.$bob->createToken('test')->plainTextToken];
+
+    app('auth')->forgetGuards(); // dans un test, le garde garde le membre de la requête d'avant
+    lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()], $entetesAda)->assertStatus(202);
+    app('auth')->forgetGuards(); // dans un test, le garde garde le membre de la requête d'avant
+    attendErreurContrat(lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()], $entetesAda), 429, 'ERR_TOO_MANY_REQUESTS', null);
+
+    app('auth')->forgetGuards(); // dans un test, le garde garde le membre de la requête d'avant
+    lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()], $entetesBob)->assertStatus(202);
+    app('auth')->forgetGuards(); // dans un test, le garde garde le membre de la requête d'avant
+    lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()])->assertStatus(202); // le visiteur est compté par son IP, à part
+});
+
+it('ne limite pas la lecture de l\'état d\'une recherche avec le quota de lancement', function () {
+    Cache::flush();
+    Reglage::definir('quota_recherche_reseau', '1');
+
+    lancerRechercheReseau($this)->assertStatus(202);
+    attendErreurContrat(lancerRechercheReseau($this, ['identifiant' => (string) Str::uuid()]), 429, 'ERR_TOO_MANY_REQUESTS', null);
+
+    $this->getJson('/api/v1/app/recherches-reseau/'.RECHERCHE_ID)->assertOk();
 });

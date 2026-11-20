@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
@@ -81,11 +82,20 @@ class AppServiceProvider extends ServiceProvider
 
         // Publier (créer un lien court, signaler) : 20 par minute par défaut, ouvert aux visiteurs donc plus serré (anti-spam).
         RateLimiter::for('publication', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_publication'))->by(self::cleDeQuota($request)));
+
+        // Recherche sur tout le réseau (V15) : une seule requête de l'application en déclenche une vers CHAQUE pair, donc
+        // le quota est plus serré (10 par minute par défaut). Même clé que les autres : le compte du membre, sinon l'IP.
+        // Seul le lancement (POST) est limité ; lire l'état d'une recherche reste sous « lecture ».
+        RateLimiter::for('recherche-reseau', fn (Request $request) => Limit::perMinute(Reglage::quota('quota_recherche_reseau'))->by(self::cleDeQuota($request)));
     }
 
     /** Un membre reconnu compte par son identifiant, un visiteur par son adresse IP. */
     private static function cleDeQuota(Request $request): string
     {
-        return $request->user() !== null ? 'membre:'.$request->user()->getAuthIdentifier() : 'ip:'.$request->ip();
+        // Le limiteur passe AVANT le middleware « auth.optionnelle » (Laravel trie les middlewares par priorité) :
+        // $request->user() est donc vide à ce stade. On lit le jeton nous-mêmes, sinon un membre serait compté par son IP.
+        $membre = $request->user() ?? ($request->bearerToken() !== null ? Auth::guard('sanctum')->user() : null);
+
+        return $membre !== null ? 'membre:'.$membre->getAuthIdentifier() : 'ip:'.$request->ip();
     }
 }
