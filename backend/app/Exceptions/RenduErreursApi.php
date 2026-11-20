@@ -29,6 +29,10 @@ final class RenduErreursApi
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );
 
+        // Les erreurs « du contrat » (401, 404, 422…) sont des réponses normales, pas des incidents : sans cela
+        // Laravel écrirait une entrée « error » avec la trace dans le journal à chaque adresse refusée d'un pair.
+        $exceptions->dontReport([ErreurApi::class, ErreurMoteur::class]);
+
         // Un rendu qui répond null laisse la main au rendu suivant (puis au rendu par défaut).
         $exceptions->render(fn (Throwable $e, Request $request) => self::rendre($e, $request));
     }

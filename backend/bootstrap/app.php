@@ -1,9 +1,11 @@
 <?php
 
 use App\Exceptions\RenduErreursApi;
+use App\Http\Middleware\JetonReseau;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 return Application::configure(basePath: dirname(__DIR__))
@@ -28,7 +30,14 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // TrimStrings retirerait les espaces en bord de ces champs : ça casserait le mode « page »
         // (3 200 caractères exactement), le passage d'un lien court et les mots de passe.
-        $middleware->trimStrings(except: ['texte', 'passage', 'mot_de_passe', 'mot_de_passe_actuel']);
+        // « adresses.* » : une adresse ne se corrige pas, pas même d'un espace (POST /lectures).
+        $middleware->trimStrings(except: ['texte', 'passage', 'mot_de_passe', 'mot_de_passe_actuel', 'adresses.*']);
+
+        // POST /lectures : une adresse vide « "" » doit rester une chaîne vide (une adresse refusée), pas devenir
+        // null, qui serait indiscernable d'un élément absent.
+        $middleware->convertEmptyStringsToNull(except: [fn (Request $request) => $request->is('api/v1/lectures')]);
+
+        $middleware->alias(['jeton.reseau' => JetonReseau::class]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         RenduErreursApi::enregistrer($exceptions);
